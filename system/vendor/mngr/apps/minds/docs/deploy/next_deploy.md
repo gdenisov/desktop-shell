@@ -99,7 +99,7 @@ deploy was deliberately not done.
   three must precede the first `server setup` / `prep` from this version on
   any tier.
 
-- [ ] **Re-prep the dev gen-2 canary boxes** once 041 is applied
+- [x] **Re-prep the dev gen-2 canary boxes** once 041 is applied
   (`minds-admin server prep --server-id <id>`, with no stop/start in flight on
   the box): the prep converges each box onto the `slicehost` service user,
   removes `limahost`, stamps the row, and installs the slice DHCP server
@@ -113,17 +113,21 @@ deploy was deliberately not done.
   1) came back at the new /30 by DHCP with the adopted host key, root's
   `authorized_keys` and the single cloud-init instance all unchanged, and a
   VM reboot and a lease renewal re-leased cleanly; `just server-audit` was
-  clean. The vin canary (`1151d45f`) still needs the re-prep (it holds the
-  leased dev workspaces, so re-prep it with no stop/start in flight), and the
-  same bake/lease/stop/restore check there is the cross-box case.
+  clean. Done for all three dev-josh-2 gen-2 boxes (`716159c2`, `d7c0d9a3`,
+  `45dcd2a4`) on 2026-09-13 from the merged tree, which also installed the S3
+  IPv4 pin and its telemetry-manifest entries; the audit stayed clean (4
+  exclusive, 0 contaminated).
 
-- [ ] **Retire the pre-#849 dev gen-2 slices.** Slices carved before the DHCP
+- [x] **Retire the pre-#849 dev gen-2 slices.** Slices carved before the DHCP
   change carry a static netplan for their original ordinal and cannot restore
   onto another ordinal or box (no replay applies the new address). Destroy and
   re-bake the dev boxes' `available` rows, re-create the leased dev
   workspaces, and `minds-admin workspaces release` their `stopped` rows. No
   staging or production gen-2 slice predates the change, so no compatibility
-  path exists.
+  path exists. Done: the leased dev-josh-2 workspaces were released on
+  2026-09-12 and the last four `available` rows (baked from the deleted
+  provisional tag) were destroyed on 2026-09-13; the dev pool is re-baked from
+  the real `minds-v0.6.0` tag.
 
 - [ ] **Deploy the production services.** Production runs connector
   `dabb19b95b`, whose `FALLBACK_BRANCH` is `minds-v0.4.3`, so browser creates
@@ -188,9 +192,11 @@ deploy was deliberately not done.
 
 - [ ] From the release carrying the phase-5.5 stack on, gen-2 boxes bake only
   minds-v0.6.0+ tags and gen-1 boxes only older ones (the bake-time guard);
-  the `minds-v0.6.0` tags on mngr and default-workspace-template currently
-  point at the gen2-combined test commits (re-point them at the real
-  release when it is cut; no release build was made for them);
+  the provisional `minds-v0.6.0` tags that pointed at the gen2-combined
+  test commits were deleted on 2026-09-12 (no release build was ever made
+  for them), so the real 0.6.0 is cut fresh from `main`; the dev-josh-2
+  pool rows baked from them stay usable but show the "older version"
+  banner and are destroyed at the re-bake;
   cut 0.6.x releases for the gen-2 cohort and keep 0.5.x stocked on gen-1
   until its create rate reads ~zero.
 - [ ] Begin migrations per tier in the order dev -> staging -> production once

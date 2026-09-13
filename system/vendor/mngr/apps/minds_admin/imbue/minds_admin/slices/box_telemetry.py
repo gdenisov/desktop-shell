@@ -22,6 +22,7 @@ from typing import Final
 
 from imbue.imbue_common.pure import pure
 from imbue.minds_admin.slices.management_plane import WIREGUARD_CONFIG_PATH
+from imbue.minds_admin.slices.s3_ipv4_pin import S3_IPV4_PIN_ARTIFACT_PATHS
 from imbue.minds_admin.slices.storage_encryption import JOURNAL_FLUSH_DROP_IN_PATH
 from imbue.minds_admin.slices.storage_encryption import STORAGE_BIND_MOUNT_UNIT_PATHS
 from imbue.minds_admin.slices.storage_encryption import STORAGE_CRYPTTAB_PATH
@@ -89,6 +90,10 @@ PREP_ARTIFACT_MANIFEST_TARGETS: Final[tuple[str, ...]] = (
     STORAGE_CRYPTTAB_PATH,
     *STORAGE_BIND_MOUNT_UNIT_PATHS,
     JOURNAL_FLUSH_DROP_IN_PATH,
+    # The S3 IPv4 pin script and its units: the script decides where every
+    # workspace stop/start artifact is uploaded to, and the timer is a
+    # root-run-every-minute hook.
+    *S3_IPV4_PIN_ARTIFACT_PATHS,
 )
 
 # Collection cadence. Matches the otelcol hostmetrics interval so the counter

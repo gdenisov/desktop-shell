@@ -16,7 +16,7 @@ Fixed (found on the dev-tier test pass): the deployment tests that lease a pool 
 
 Docs (found during the gen-2 final test pass, 2026-09-10): the box-ordering runbook and the `server-order` recipe comment name the production box plan as `24sys03-v1-us` (Xeon-E 2288G, 128 GB, `softraid-2x960nvme`, 14 slices); OVH's eco catalog no longer lists the `24sys032-us` code they used to name, so a copy-pasted order failed with "plan not found". The option families (`bandwidth-1000-24sys-us`, `vrack-bandwidth-500-24sys-us`) and the $160 first-month price are unchanged.
 
-`next_deploy.md`: recorded that the CI infra DB and the dev envs have applied the gen-2 connector migrations (028-041 on CI infra, 034-041 via `env deploy` on dev-josh-2 / dev-gen2mig) and that the current `minds-v0.6.0` tags are test pointers to re-point at the real release.
+`next_deploy.md`: recorded that the CI infra DB and the dev envs have applied the gen-2 connector migrations (028-041 on CI infra, 034-041 via `env deploy` on dev-josh-2 / dev-gen2mig).
 
 `gen2-cutover.md`: the rollback section now mentions that a mid-migration rollback re-stamps the harvested host keys onto the row.
 
@@ -31,3 +31,7 @@ Fixed (found on the 2026-09-12 desktop test pass): a second device signed in to 
 
 Docs: the environments reference's desktop-client and destroy sections and the testing overview now state that one machine must never run two minds instances against the same env at once (see the `minds-admin env stop-local` entry in `apps/minds_admin`), and that the destroy preflight recognizes a dev launch.
 
+
+`gen2-telemetry.md`: the prep-artifact integrity list now includes the S3 IPv4 pin refresher script and its service and timer.
+
+`next_deploy.md`: the provisional `minds-v0.6.0` tags were deleted rather than re-pointed; the real tag is cut from `main`.

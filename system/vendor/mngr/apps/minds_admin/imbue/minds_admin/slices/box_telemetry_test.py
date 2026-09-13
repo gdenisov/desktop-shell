@@ -55,6 +55,21 @@ def test_manifest_covers_the_storage_volume_artifacts() -> None:
         assert unit_path in PREP_ARTIFACT_MANIFEST_TARGETS
 
 
+def test_manifest_covers_the_s3_ipv4_pin_artifacts() -> None:
+    # The pin script decides the address every workspace stop/start artifact
+    # is uploaded to and restored from, and its timer is a root-run-every-minute
+    # hook, so a change to any of them must signal like the other root-owned
+    # prep artifacts. The managed /etc/hosts block itself changes by design and
+    # must stay out of the manifest.
+    for artifact_path in (
+        "/usr/local/sbin/mngr-s3-ipv4-pin.sh",
+        "/etc/systemd/system/mngr-s3-ipv4-pin.service",
+        "/etc/systemd/system/mngr-s3-ipv4-pin.timer",
+    ):
+        assert artifact_path in PREP_ARTIFACT_MANIFEST_TARGETS
+    assert "/etc/hosts" not in PREP_ARTIFACT_MANIFEST_TARGETS
+
+
 def test_prep_section_converges_artifacts_and_records_the_hash_manifest() -> None:
     section = render_box_telemetry_prep_section(
         overlay_cidr="10.112.0.0/16", declared_uplink_mbps=500, management_proxy_static_ips=()

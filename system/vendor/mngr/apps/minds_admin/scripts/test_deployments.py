@@ -157,6 +157,12 @@ _MODAL_ENV_LIST_TIMEOUT_SECONDS: Final[int] = 60
 # Used only to resolve the ci tier's Modal workspace when listing envs for the
 # sweep; never materialized as a real env.
 _CI_TIER_PROBE_ENV_NAME: Final[str] = "ci-probe"
+# The activation-only scaffolding env for the standing CI boxes (specs/remote-
+# workspaces-in-ci.md): no Modal env, no deploy, just a root dir so ``minds-admin``
+# box commands that run outside a per-run env still know their tier. A gen-2
+# box is dialed with a certificate the tier's Vault SSH CA signs, so the warm
+# and sweep verbs need this activation even though they read no env state.
+_CI_INFRA_ENV_NAME: Final[str] = "ci-infra"
 
 
 # ---------------------------------------------------------------------------
@@ -1262,10 +1268,11 @@ def warm_pool_cache(template_ref: str | None, template_dir: str | None, region: 
     Selects the same box the bake stage will select (shared deterministic rule over the
     infra DB's rows, which import-boxes copies id-preserving into the per-run env), then
     runs ``minds-admin pool warm-cache`` against it so the run's cold seed build overlaps
-    the env deploy instead of following it. Needs no minds env: the box row is read from
-    the CI infra DB and the pool key is handed to the subprocess from the ci tier's Vault
-    entry. Exit status mirrors the verb's, and the CI job treats it as advisory (the bake
-    stage's own seed phase is the fallback). See specs/remote-workspaces-in-ci.md.
+    the env deploy instead of following it. Needs no per-run env: the box row is read from
+    the CI infra DB, and the verb runs under the ``ci-infra`` activation so it dials a gen-2
+    box with a certificate the ci tier's SSH CA signs (a gen-1 box with the tier's pool key
+    from Vault). Exit status mirrors the verb's, and the CI job treats it as advisory (the
+    bake stage's own seed phase is the fallback). See specs/remote-workspaces-in-ci.md.
     """
     if template_ref is not None and template_dir is not None:
         raise click.UsageError(
@@ -1274,13 +1281,7 @@ def warm_pool_cache(template_ref: str | None, template_dir: str | None, region: 
         )
     infra_dsn = _read_ci_infra_pool_dsn()
     server_id = _select_ci_box_for_region(infra_dsn, region=region)
-    pool_key = read_vault_kv(VaultPath(f"{_CI_VAULT_PREFIX}/pool-ssh")).get("POOL_SSH_PRIVATE_KEY", "")
-    if not pool_key:
-        raise MindError(
-            f"Vault entry {_CI_VAULT_PREFIX}/pool-ssh is missing POOL_SSH_PRIVATE_KEY; cannot SSH the CI box."
-        )
-    sub_env = dict(os.environ)
-    sub_env["POOL_SSH_PRIVATE_KEY"] = pool_key
+    sub_env = _ci_infra_subprocess_env()
     if template_dir is None:
         dwt_key_b64 = os.environ.get(_DWT_READ_KEY_ENV_VAR) or _read_dwt_key_from_vault_or_none()
     else:
@@ -1310,6 +1311,42 @@ def warm_pool_cache(template_ref: str | None, template_dir: str | None, region: 
             timeout_seconds=_MINDS_WARM_TIMEOUT_SECONDS,
         )
     sys.exit(warm_rc)
+
+
+@cli.command(name="sweep-ci-slices")
+@click.option(
+    "--max-age-hours",
+    default=None,
+    type=float,
+    help="Destroy CI-owned slices older than this (default: the sweep's own threshold).",
+)
+def sweep_ci_slices(max_age_hours: float | None) -> None:
+    """Destroy stale CI-tier slices on the standing boxes (the release teardown job's crash backstop).
+
+    Runs ``minds-admin server sweep-ci-slices`` against the CI infra DB under the
+    ``ci-infra`` activation, so the sweep reaches gen-2 boxes with a certificate the
+    ci tier's SSH CA signs (and gen-1 boxes with the tier's pool key from Vault).
+    Exit status mirrors the verb's. See specs/remote-workspaces-in-ci.md.
+    """
+    infra_dsn = _read_ci_infra_pool_dsn()
+    max_age_args = [] if max_age_hours is None else ["--max-age-hours", str(max_age_hours)]
+    sweep_rc = _run_minds_admin_streaming(
+        ["server", "sweep-ci-slices", "--database-url", infra_dsn, *max_age_args],
+        sub_env=_ci_infra_subprocess_env(),
+        timeout_seconds=_MINDS_SWEEP_TIMEOUT_SECONDS,
+    )
+    sys.exit(sweep_rc)
+
+
+def _ci_infra_subprocess_env() -> dict[str, str]:
+    """The subprocess env of a ``minds-admin`` box command run under the ``ci-infra`` activation.
+
+    Mirrors ``minds-admin env activate --create ci-infra``: the env root is created
+    when absent (a fresh CI runner has none) and the activation variables point at it.
+    """
+    infra_env_name = DevEnvName(_CI_INFRA_ENV_NAME)
+    env_root_dir(infra_env_name).mkdir(parents=True, exist_ok=True)
+    return build_minds_env_subprocess_env(infra_env_name)
 
 
 def _read_ci_infra_pool_dsn() -> str:

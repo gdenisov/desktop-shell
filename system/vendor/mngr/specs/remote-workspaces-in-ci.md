@@ -122,7 +122,7 @@ A new `minds-admin server sweep-ci-slices` command (run against the infra DB's b
 - The env deploy already stamps a per-env `WORKSPACE_STORAGE_KEY_PREFIX` (`<env>/`) for per-env-Modal-env tiers and `minds-admin env destroy` already reclaims the prefix, so no code changes are needed -- populating the Vault entry lights the whole path up.
 - `test_workspace_stop_start` then stops skipping.
   **Measured (phase 1):** the full cycle against the standing vin box took ~2.6 hours -- the ~13 GB artifact upload ran at ~1.4 MB/s effective, far below the 6-25 MB/s the stop/start docs assume -- which no CI job budget fits.
-  The test is therefore gated behind an explicit `MINDS_STOP_START_RELEASE_TEST=1` opt-in (the `MNGR_AWS_RELEASE_TESTS` pattern) until one of the open-questions follow-ups lands; the CI services step does not set it.
+  The test was therefore gated behind an explicit `MINDS_STOP_START_RELEASE_TEST=1` opt-in while the CI boxes were gen-1; with the CI boxes repaved to gen-2 (2026-09-13), whose uploads ride the S3 IPv4 pin at ~100 MB/s, the gate is gone and the test runs in every release dispatch.
 
 ### Empty-pool semantics
 
@@ -144,7 +144,7 @@ A new `minds-admin server sweep-ci-slices` command (run against the infra DB's b
 - `test_lease_isolation_and_release` (`minds_services`; the deferred test from minds-deployment-tests.md, slice-era): lease a pre-baked slice as verified user A, assert user B cannot see the host via the user-facing API (404, not 403), release, assert the slot is freed and the row gone.
 - `test_fast_path_create_and_destroy` (`minds_services`): configure an imbue_cloud provider instance against the per-run env, `mngr create` with `-b fast_mode=require` and the run's `(repo_url, repo_branch_or_tag)` pair (fast-path matching requires both), assert the pre-baked agent is adopted and its services boot (the workspace's `system_interface` answers), then `mngr destroy` the workspace and drive the explicit `hosts release` path (destroy itself defers lease release to GC's grace period), asserting the lease disappears from the connector.
   This is the layer where adoption, key rotation, and workspace boot are actually exercised.
-- `test_workspace_stop_start` (existing): capacity + storage config are now provided, but the measured ~2.6h cycle keeps it behind the `MINDS_STOP_START_RELEASE_TEST=1` opt-in for now (see "Stop/start integration").
+- `test_workspace_stop_start` (existing): capacity + storage config are provided, and since the gen-2 CI cutover it runs un-gated (see "Stop/start integration").
 
 ### Later (enabled by this work, not in scope)
 
@@ -221,6 +221,7 @@ just list-servers            # or await-delivery / setup-server / prep-server <i
 ```
 
 The `ci-infra` env root is activation-only scaffolding (no Modal env, no deploy); the ci Modal-env sweep never sees it.
+The orchestrator's `warm-pool-cache` and `sweep-ci-slices` commands (the CI warm job and the release teardown's crash backstop, both of which run outside any per-run env) create and activate the same root on the runner, because a gen-2 CI box is dialed with an operator certificate the ci tier's Vault SSH CA signs, and the signer needs the activation to know the tier.
 A box replacement is: order + setup the new box (rows land in the infra DB), then destroy the old box's row and cancel the OVH service.
 
 ## Open questions and risks

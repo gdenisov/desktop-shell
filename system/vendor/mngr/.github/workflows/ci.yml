@@ -1125,8 +1125,9 @@ jobs:
           curl -sSLo /tmp/vault.zip --retry 5 --retry-all-errors --retry-delay 5 "https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip"
           unzip -o /tmp/vault.zip -d /tmp/vault-bin
           sudo mv /tmp/vault-bin/vault /usr/local/bin/vault
-      # The orchestrator's Vault reads (infra DSN, pool SSH key, template deploy
-      # key) all happen at the start of the warm command, well inside the role's
+      # The orchestrator's Vault reads (infra DSN, template deploy key, and the
+      # operator certificate sign for a gen-2 box or the pool key for a gen-1
+      # one) all happen at the start of the warm command, well inside the role's
       # 30-min token TTL; everything after that is SSH to the box.
       - name: Authenticate to Vault via GitHub OIDC
         run: |
@@ -1661,18 +1662,12 @@ jobs:
       # older than the staleness threshold (a slice this run leaked stays
       # younger than the threshold now and is reclaimed by the NEXT run's
       # bake-stage prologue sweep, or by this step on that run's teardown).
-      # Non-activated invocation: the pool key and infra DSN come from env
-      # vars read out of the ci tier's Vault entries.
+      # The orchestrator runs the sweep under the ci-infra activation (reading
+      # the infra DSN from Vault itself), which is what lets it reach a gen-2
+      # box with a certificate signed by the ci tier's SSH CA.
       - name: Sweep stale CI slices off the standing boxes
         if: always()
-        run: |
-          set -euo pipefail
-          # Assignments split from the exports so a failed vault read stops the
-          # step here (export's own exit status would mask it from set -e).
-          MINDS_HOST_POOL_DSN="$(vault kv get -field=value -mount=secrets minds/ci/neon/DATABASE_URL)"
-          POOL_SSH_PRIVATE_KEY="$(vault kv get -field=value -mount=secrets minds/ci/pool-ssh/POOL_SSH_PRIVATE_KEY)"
-          export MINDS_HOST_POOL_DSN POOL_SSH_PRIVATE_KEY
-          uv run minds-admin server sweep-ci-slices
+        run: uv run python apps/minds_admin/scripts/test_deployments.py sweep-ci-slices
 
   # Release tier (manual). The home for *all* minds release tests, gated to a
   # manual run rather than every push (the minds release procedure is a manual
