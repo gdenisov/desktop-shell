@@ -188,9 +188,11 @@ deploy was deliberately not done.
 
 - [ ] From the release carrying the phase-5.5 stack on, gen-2 boxes bake only
   minds-v0.6.0+ tags and gen-1 boxes only older ones (the bake-time guard);
-  the `minds-v0.6.0` tags on mngr and default-workspace-template currently
-  point at the gen2-combined test commits (re-point them at the real
-  release when it is cut; no release build was made for them);
+  the provisional `minds-v0.6.0` tags that pointed at the gen2-combined
+  test commits were deleted on 2026-09-12 (no release build was ever made
+  for them), so the real 0.6.0 is cut fresh from `main`; the dev-josh-2
+  pool rows baked from them stay usable but show the "older version"
+  banner and are destroyed at the re-bake;
   cut 0.6.x releases for the gen-2 cohort and keep 0.5.x stocked on gen-1
   until its create rate reads ~zero.
 - [ ] Begin migrations per tier in the order dev -> staging -> production once

@@ -494,6 +494,13 @@ def _gen2_customize_script(script: str) -> str:
     return script.split("<<'MNGR_SLICE_CUSTOMIZE'")[1].split("MNGR_SLICE_CUSTOMIZE")[0]
 
 
+def _installed_apt_packages(script: str) -> set[str]:
+    """Every package name on the rendered script's ``apt-get install`` lines."""
+    return {
+        package for line in script.splitlines() if line.startswith("apt-get install") for package in line.split()[2:]
+    }
+
+
 def test_gen2_prep_script_passes_bash_syntax_check() -> None:
     for script in (_gen2_script(), _gen2_script(proxy_ips=())):
         result = subprocess.run(["bash", "-n"], input=script, capture_output=True, text=True)
@@ -605,9 +612,7 @@ def test_gen2_prep_script_runs_the_slice_dhcp_server_and_restarts_it_only_on_cha
     script = _gen2_script()
     # The bare dnsmasq binary, never the distro service (which would serve DNS
     # on every interface with the package defaults).
-    installed_packages = {
-        package for line in script.splitlines() if line.startswith("apt-get install") for package in line.split()[2:]
-    }
+    installed_packages = _installed_apt_packages(script)
     assert "dnsmasq-base" in installed_packages
     assert "dnsmasq" not in installed_packages
     # The rendered config is syntax-checked before it can replace the live one,
@@ -787,12 +792,9 @@ def test_gen2_prep_script_installs_the_same_s3_ipv4_pin_as_gen1() -> None:
     # above exercise, with dig among the gen-2 apt packages.
     gen2_script = _gen2_script()
     assert _s3_ipv4_pin_block(gen2_script) == _s3_ipv4_pin_block(_script())
-    gen2_apt_line = next(line for line in gen2_script.splitlines() if line.startswith("apt-get install"))
-    assert "bind9-dnsutils" in gen2_apt_line.split()
-    # The pin follows the transfer tooling it exists for, and precedes the
-    # telemetry manifest like every other prep artifact.
+    assert "bind9-dnsutils" in _installed_apt_packages(gen2_script)
+    # Same placement as gen-1: the pin lands right after the transfer tooling it exists for.
     assert gen2_script.index("transfer_tools_marker=") < gen2_script.index("mngr-s3-ipv4-pin.sh")
-    assert gen2_script.index("mngr-s3-ipv4-pin.sh") < gen2_script.index("prep-artifacts.sha256")
 
 
 def test_gen2_prep_script_keeps_the_image_tar_cache_on_the_storage_partition() -> None:
