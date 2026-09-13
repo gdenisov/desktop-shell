@@ -1488,6 +1488,16 @@ jobs:
             minds/ci/runs/${{ steps.sync_e2e_env.outputs.env_name }}/shared-default/MINDS_ADMIN_KEY
             minds/ci/paid-accounts/CI_TEST_USER_EMAIL
             minds/ci/paid-accounts/CI_TEST_USER_PASSWORD
+      # Three services tests drive a real browser (the hosted signup pages and
+      # the web chrome) and skip when Chromium is absent. Install it at a fixed,
+      # HOME-independent path: the minds conftest re-points $HOME at a per-test
+      # tmpdir, so Playwright's default install location would be invisible to
+      # the test process. The services step below reads the same path.
+      - name: Install Playwright Chromium (for the browser-driven services tests)
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.run_minds_release_tests }}
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.ms-playwright
+        run: uv run playwright install --with-deps chromium
       # The realistic-signup test (test_account_signup_e2e.py) drives a real
       # verification email through a throwaway mail.tm mailbox. The env-build
       # job cannot hand one over (it runs on a separate runner), so mint one
@@ -1523,6 +1533,7 @@ jobs:
           MINDS_DEPLOYMENT_TEST_SHARED_DEFAULT_SUPERTOKENS_API_KEY: ${{ env.SUPERTOKENS_API_KEY }}
           MINDS_DEPLOYMENT_TEST_SHARED_DEFAULT_NEON_HOST_POOL_DSN: ${{ env.NEON_HOST_POOL_DSN }}
           MINDS_DEPLOYMENT_TEST_SHARED_DEFAULT_NEON_LITELLM_DSN: ${{ env.NEON_LITELLM_DSN }}
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.ms-playwright
           # The imbue_common session guard defaults to a 150s suite limit,
           # which pytest.exit()s the session (suppressing the failure
           # tracebacks) -- these live tests legitimately run for many minutes.

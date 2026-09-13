@@ -114,6 +114,9 @@ _OPT_IN_ENV_VAR: Final[str] = "MNGR_LATCHKEY_E2E_TESTS"
 pytestmark = [
     pytest.mark.release,
     pytest.mark.docker,
+    # Step (c) opens the workspace's outer host in-process through the docker
+    # provider, which talks to the daemon with the docker SDK.
+    pytest.mark.docker_sdk,
     pytest.mark.rsync,
     pytest.mark.timeout(1800),
     pytest.mark.skipif(
@@ -525,7 +528,7 @@ def _machine_of(
     host through its provider; here that config lives in ``env``, so it is
     applied to this process for the duration.
     """
-    with _environment(env):
+    with _environment(env), ConcurrencyGroup(name="latchkey-e2e-providers") as concurrency_group:
         # The autouse plugin_manager fixture loads the backend registry in
         # local-only mode (no docker), and that load is sticky: the singleton
         # created below would otherwise find the registry already loaded and
@@ -533,7 +536,7 @@ def _machine_of(
         # from a clean registry so the singleton's own load includes it.
         reset_backend_registry()
         reset_plugin_manager()
-        mngr_ctx = load_config(get_or_create_plugin_manager(), ConcurrencyGroup(name="latchkey-e2e-providers"))
+        mngr_ctx = load_config(get_or_create_plugin_manager(), concurrency_group)
         provider = get_provider_instance(ProviderInstanceName("docker"), mngr_ctx)
         with provider.outer_host_for(HostId(host_id)) as outer:
             assert outer is not None and not outer.is_local, "the fake VPS did not resolve as a remote outer host"
