@@ -136,8 +136,9 @@ def program_block(program: str, *registrations: tuple[str, str]) -> str:
     return '[program:{}]\ncommand=bash -c "{}"\n\n'.format(program, forwards)
 
 
-# The workspace's own system/supervisord.conf, which before the first turn is still the pinned
-# template's file verbatim. Only an app whose forward_port.py call sits in the config is visible
+# The workspace's own supervisord config as the capture prints it -- the main file followed by the
+# drop-ins under `system/supervisord.conf.d/` -- which before the first turn is still the pinned
+# template's own files. Only an app whose forward_port.py call sits in the config is visible
 # through it.
 TEMPLATE_SUPERVISORD_CONF: Final[str] = "".join(
     (
@@ -660,19 +661,18 @@ def worker_listing_json(worker_state: str) -> str:
     )
 
 
-def worker_listing_output(listing_json: str) -> str:
-    return probe_sections(list_exit="0\n", listing=listing_json, stderr="")
+def worker_listing_output(listing_json: str, *, list_exit: str = "0") -> str:
+    return probe_sections(list_exit=list_exit + "\n", listing=listing_json, stderr="")
 
 
 def worker_capture_output(
-    document_exit: str, stream_exit: str, preserved: str, report_path: str, stderr: str, *, report_exit: str = "0"
+    document_exit: str, stream_exit: str, report_path: str, stderr: str, *, report_exit: str = "0"
 ) -> str:
     """What one `worker_capture_command` run prints for a launch that named a task file: the report
     sections carry the path the task file named and, when it named one, the copy's exit status."""
     return probe_sections(
         document_exit=document_exit + "\n",
         stream_exit=stream_exit + "\n",
-        preserved=preserved + ("\n" if preserved else ""),
         report_path=report_path + ("\n" if report_path else ""),
         report_exit=report_exit + "\n" if report_path else "",
         stderr=stderr,

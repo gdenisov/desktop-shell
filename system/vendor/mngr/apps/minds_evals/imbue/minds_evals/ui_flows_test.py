@@ -12,12 +12,13 @@ from imbue.minds_evals.testing import FAKE_WORKSPACE_AGENT_ID
 
 
 def _action(
-    kind: ui_flows.FlowActionKind, role: str = "", target: str = "", text: str = "", amount: int = 0
+    kind: ui_flows.FlowActionKind, role: str = "", target: str = "", text: str = "", amount: int = 0, ref: str = ""
 ) -> ui_flows.FlowAction:
     return ui_flows.FlowAction(
         kind=kind,
         role=role,
         target=target,
+        ref=ref,
         text=text,
         amount=amount,
         reasoning="the page",
@@ -45,10 +46,14 @@ def test_every_executor_level_reason_stops_the_flow(reason: str) -> None:
     assert ui_flows.is_instrument_reason(reason) is True
 
 
-@pytest.mark.parametrize("reason", ["", ui_flows.REASON_ACTION_TIMED_OUT, ui_flows.REASON_STEP_BUDGET_EXHAUSTED])
+@pytest.mark.parametrize(
+    "reason",
+    ["", ui_flows.REASON_ACTION_TIMED_OUT, ui_flows.REASON_STEP_BUDGET_EXHAUSTED, ui_flows.REASON_STALE_REF],
+)
 def test_an_action_that_simply_did_not_work_keeps_the_flow_going(reason: str) -> None:
-    # An element that is not there is the app falling short; the browser is fine and the next step
-    # sees the real page, so writing the flow off here would excuse a genuine app failure.
+    # An element that is not there is the app falling short, and a ref that moved is the agent
+    # behind the page; the browser is fine and the next step sees the real page either way, so
+    # writing the flow off here would excuse a genuine app failure.
     assert ui_flows.is_instrument_reason(reason) is False
 
 
@@ -162,9 +167,24 @@ def test_build_step_request_carries_role_and_name_rather_than_an_index() -> None
         "kind": "input",
         "role": "textbox",
         "target": "Add a task",
+        "ref": "",
         "text": "buy milk",
         "amount": 0,
     }
+
+
+def test_build_step_request_carries_the_ref_of_a_nameless_element() -> None:
+    request = json.loads(
+        ui_flows.build_step_request(
+            _action(ui_flows.FlowActionKind.CLICK, role="checkbox", ref="e9"),
+            "/logs/shot.png",
+            cdp_endpoint_url=ui_flows.cdp_endpoint(ui_flows.flow_browser_port(0)),
+            preauth_cookie="",
+            cookie_domain="",
+        )
+    )
+
+    assert (request["action"]["role"], request["action"]["target"], request["action"]["ref"]) == ("checkbox", "", "e9")
 
 
 def test_step_command_runs_the_uploaded_script_in_the_boxs_own_venv() -> None:
@@ -257,8 +277,80 @@ def test_parse_action_rejects_an_action_that_does_not_exist() -> None:
 
 @pytest.mark.parametrize("kind", ["click", "input"])
 def test_parse_action_rejects_an_element_action_that_names_no_element(kind: str) -> None:
-    # An unnamed target would resolve to whatever the page happens to list first.
+    # An unaddressed target would resolve to whatever the page happens to list first.
     assert ui_flows.parse_action({"action": kind, "role": "button", "reasoning": "clicking"}) is None
+
+
+def test_parse_action_addresses_a_nameless_element_by_its_ref() -> None:
+    # The tree lists a checkbox with no name; the ref is the only handle the page gives it.
+    action = ui_flows.parse_action({"action": "click", "role": "checkbox", "ref": "e9", "reasoning": "mark it"})
+
+    assert action is not None
+    assert (action.role, action.target, action.ref) == ("checkbox", "", "e9")
+
+
+def test_parse_action_drops_a_ref_given_beside_a_name() -> None:
+    # A named element is addressed by its name; the record must then say so, not that it was nameless.
+    action = ui_flows.parse_action(
+        {"action": "click", "role": "checkbox", "target": "buy milk", "ref": "e9", "reasoning": "mark it"}
+    )
+
+    assert action is not None
+    assert (action.target, action.ref) == ("buy milk", "")
+
+
+def test_parse_action_rejects_a_ref_with_no_role_to_check_it_against() -> None:
+    # The role is what the step script checks the ref against on the page as it now stands, so a
+    # ref without one would be acted on whatever it has come to name.
+    assert ui_flows.parse_action({"action": "click", "ref": "e9", "reasoning": "mark it"}) is None
+    assert "no role to check it against" in ui_flows.describe_unusable_action({"action": "click", "ref": "e9"})
+
+
+def test_parse_action_drops_a_ref_on_a_kind_that_addresses_no_element() -> None:
+    # `target_ref` on a record claims the step acted on a control the page left unnamed, so it must
+    # not be set by a decision that addressed nothing at all.
+    action = ui_flows.parse_action({"action": "done", "role": "checkbox", "ref": "e9", "reasoning": "finished"})
+
+    assert action is not None
+    assert action.ref == ""
+
+
+def test_parse_action_rejects_a_ref_that_is_not_shaped_like_one() -> None:
+    assert (
+        ui_flows.parse_action({"action": "click", "role": "checkbox", "ref": "the third one", "reasoning": "x"})
+        is None
+    )
+
+
+def test_describe_unusable_action_says_what_the_decision_asked_for() -> None:
+    # The manifest entry names only the layer; this is what tells a reader of the log which of the
+    # ways a decision can be unusable it was, in the decision's own words.
+    assert ui_flows.describe_unusable_action(None) == "the model call produced no tool payload"
+    assert "'teleport', which does not exist" in ui_flows.describe_unusable_action({"action": "teleport"})
+    unaddressed = ui_flows.describe_unusable_action(
+        {"action": "click", "role": "checkbox", "reasoning": "The checkbox has no name so I cannot address it."}
+    )
+    assert unaddressed.startswith("it asked to click a checkbox without naming it or giving its ref")
+    assert "cannot address it" in unaddressed
+    assert (
+        ui_flows.describe_unusable_action({"action": "click", "role": "checkbox", "ref": "e9"})
+        == "the payload was usable"
+    )
+
+
+def test_describe_unusable_action_bounds_what_it_quotes_from_the_payload() -> None:
+    # The explanation is written into the manifest and into the flow log the judge reads, so a
+    # payload field of any length must not be able to crowd the page state out of either.
+    explained = ui_flows.describe_unusable_action({"action": "x" * 5_000})
+
+    assert len(explained) < 300 and "'xxx" in explained
+
+
+def test_the_action_prompt_allows_a_ref_only_for_a_nameless_element() -> None:
+    prompt = ui_flows._SYSTEM_PROMPT
+
+    assert "[ref=e9]" in prompt and "leave target empty" in prompt
+    assert "Use a ref for nothing else" in prompt
 
 
 def test_reload_is_its_own_action_rather_than_a_re_open() -> None:
@@ -276,6 +368,13 @@ def test_describe_action_names_the_element_a_reader_can_find() -> None:
     )
 
     assert described == "type 'buy milk' into the textbox named 'Add a task'"
+
+
+def test_describe_action_says_when_the_element_had_no_name() -> None:
+    # The record tells the reader what the page failed to label, not only what was clicked.
+    described = ui_flows.describe_action(_action(ui_flows.FlowActionKind.CLICK, role="checkbox", ref="e9"))
+
+    assert described == "click the checkbox that has no accessible name (ref e9)"
 
 
 def test_build_action_prompt_says_so_when_nothing_has_happened_yet() -> None:
@@ -321,6 +420,7 @@ def test_flow_step_record_keeps_the_page_state_verbatim() -> None:
         ui_flows.flow_step_record(
             0,
             "click the button",
+            "",
             "a delete button",
             "the row goes",
             "",
@@ -336,6 +436,28 @@ def test_flow_step_record_keeps_the_page_state_verbatim() -> None:
     assert (record["step_index"], record["screenshot"]) == (0, "step_000.png")
 
 
+def test_flow_step_record_carries_the_ref_a_nameless_element_was_addressed_by() -> None:
+    # Its own field beside the prose: the judge's digest and a later measure of unlabeled controls
+    # read it rather than the sentence.
+    record = json.loads(
+        ui_flows.flow_step_record(
+            2,
+            "click the checkbox that has no accessible name (ref e9)",
+            "e9",
+            "mark it complete",
+            "the row is struck through",
+            "",
+            StepReaction.SETTLED,
+            "- checkbox [ref=e9]",
+            "s.png",
+            "",
+            "t",
+        )
+    )
+
+    assert record["target_ref"] == "e9"
+
+
 def test_flow_step_record_says_when_the_action_never_ran() -> None:
     # The judge rules on the `expect` from this log, so a step showing a click next to
     # an unchanged screenshot -- with no note that it was rejected -- would mislead it.
@@ -343,6 +465,7 @@ def test_flow_step_record_says_when_the_action_never_ran() -> None:
         ui_flows.flow_step_record(
             2,
             "click the button named 'Delete'",
+            "",
             "a delete button",
             "the row goes",
             "",
@@ -363,7 +486,7 @@ def test_every_record_kind_names_itself() -> None:
     init = json.loads(ui_flows.flow_init_record("open it", "it opens", "https://x/", "- heading", "s.png", "t"))
     action = json.loads(
         ui_flows.flow_step_record(
-            1, "click", "a button", "a row goes", "", StepReaction.SETTLED, "- heading", "", "", "t"
+            1, "click", "", "a button", "a row goes", "", StepReaction.SETTLED, "- heading", "", "", "t"
         )
     )
     final = json.loads(ui_flows.flow_final_record(2, "the row is gone", "- heading", "t"))
@@ -388,6 +511,7 @@ def test_an_action_records_what_it_predicted_and_what_followed() -> None:
         ui_flows.flow_step_record(
             3,
             "click the button named 'Platform'",
+            "",
             "a team button",
             "the list narrows",
             "- button [pressed]",

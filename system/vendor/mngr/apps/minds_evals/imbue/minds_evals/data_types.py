@@ -262,8 +262,9 @@ class CapturedFile(FrozenModel):
 
 class WorkerState(LowerCaseStrEnum):
     """A background worker's state at collection time: the listing's lifecycle state folded down when
-    the worker is listed, DESTROYED when only mngr's preserved copy of it remains, and UNKNOWN when
-    neither the listing nor a preserved directory says."""
+    the worker is listed, DESTROYED when a complete listing did not name it but its stream still came
+    out of mngr's archive, and UNKNOWN whenever that falls short -- no listing that could speak for
+    it, or no stream to show for its absence."""
 
     STOPPED = auto()
     RUNNING = auto()
@@ -293,13 +294,31 @@ class WorkerListingEntry(FrozenModel):
     work_dir: str = Field(description="The agent's work dir, which launch commands' paths are relative to")
 
 
+class WorkerListing(FrozenModel):
+    """The workspace's agents as one collection attempt saw them.
+
+    `is_complete` is what licenses reading a worker's *absence* as meaning something: `mngr list`
+    defaults to --on-error continue, so it can answer with some agents and a non-zero exit when a
+    provider was unreachable. Only a listing that reported every agent it was asked for can say that
+    an agent it does not name is gone.
+    """
+
+    entries: tuple[WorkerListingEntry, ...] = Field(
+        default=(), description="The agents the listing named, in the order it named them"
+    )
+    is_complete: bool = Field(default=False, description="Whether the listing reported every agent without error")
+
+
 class WorkerCapture(FrozenModel):
     """What the evidence phase brought out for one launched worker: its ATIF document, its stream, and the
     report it pushed back to its lead, each recorded on its own."""
 
     launch: WorkerLaunch = Field(description="The launch this capture answers")
     agent_id: str = Field(description="The worker's mngr agent id; empty when it could not be resolved")
-    agent_type: str = Field(description="The worker's agent type from the listing; empty when it was not listed")
+    agent_type: str = Field(
+        description="The worker's agent type: the listing's, or the captured document's when the listing "
+        "did not name the worker; empty when neither said"
+    )
     state: WorkerState = Field(description="The worker's state at collection time")
     document: CapturedFile = Field(description="The ATIF document mngr built for the worker")
     stream: CapturedFile = Field(description="The worker's common-transcript stream, live or preserved")
