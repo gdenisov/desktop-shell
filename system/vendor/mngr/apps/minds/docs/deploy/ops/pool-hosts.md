@@ -269,14 +269,22 @@ path before concluding anything about the bake.
 
 ## Production
 
-Same sequence as above, against production, with three additions: sizing from
-the live fleet, retiring the old generation, and the connector deploy.
+Same sequence as above, against production, with two additions: sizing from the
+live fleet, and a retire of the old generation that waits on the web channels.
+The connector deploy ([services.md](./services.md)) precedes this section on
+production; the `release-minds` skill sequences the two.
 
-**Bake before you deploy.** A deploy freezes `MINDS_WEB_TEMPLATE_REF` from
-`FALLBACK_BRANCH` in the tree it ships, and browser creates (`/hosts/claim`)
-match that tag exactly with **no rebuild fallback** — unlike the desktop, which
-falls back to a slow rebuild. Deploying ahead of the bake breaks browser creates
-until the bake lands.
+**Bake before you repoint the web channels.** Browser creates (`/hosts/claim`)
+lease an exact match on the tag the release feed's `<channel>-web.json` names
+(`[web_channels.*]` in `apps/minds/release-channels.toml`), with **no rebuild
+fallback** — unlike the desktop, which falls back to a slow rebuild. Repointing
+a web channel at a tag the pool is not yet baked at breaks that channel's browser
+creates until the bake lands. A connector deploy no longer moves the pin on
+production; the `FALLBACK_BRANCH` it freezes into `MINDS_WEB_TEMPLATE_REF`
+serves only while the feed cannot be read (and outright on tiers with no feed).
+So on production the order is deploy, bake, then repoint
+([app-release.md](./app-release.md) step 9b); the bake sits in the middle, and
+the rows the web channels still pin to stay `available` until the repoint lands.
 
 Assume a fresh shell — a release usually pauses before this point:
 
@@ -325,7 +333,17 @@ are safe: run the regions in parallel shells.
 
 Bake and verify exactly as above, then lease one from the desktop and confirm it
 served your bake ([app-release.md](./app-release.md), *Verifying a release in a
-running workspace*). Only then retire the old generation:
+running workspace*).
+
+Retiring the old generation waits for one more thing on production: the web
+channels. Its `available` rows are what browser creates lease until
+`[web_channels.*]` moves off its tag ([app-release.md](./app-release.md) step
+9b). The connector reads that pin from the feed's `<channel>-web.json`, served
+with a one-minute cache and cached another minute in the connector, so retire a
+tag's rows only once `curl -s https://updates.imbueminds.com/<channel>-web.json`
+names another tag for every channel and a further minute has passed. A channel
+left behind — stable, during a gradual desktop rollout — keeps leasing its tag,
+and its rows stay. Then:
 
 ```bash
 # One old generation's available, never-leased rows: the only set safe to destroy.

@@ -109,7 +109,9 @@ class UiFlow(FrozenModel):
     """One behavioral flow through the delivered UI, exactly as authored."""
 
     name: str = Field(description="Stable flow name; names the flow's evidence directory")
-    steps: str = Field(description="Natural-language step sequence (empty when the flow carries a script)")
+    actions: str = Field(
+        description="What to do in the UI, in natural language (empty when the flow carries a script)"
+    )
     expect: str = Field(description="The verifiable end condition (empty when the flow carries a script)")
     script: str = Field(description="Per-case script file for flows anchored in a known app (empty otherwise)")
     surface: FlowSurface = Field(description="Where the flow enters the app; defaults to the forwarded origin")
@@ -153,13 +155,15 @@ class FilesCheck(FrozenModel):
 class UiFlowCheck(FrozenModel):
     """An expanded UI flow: one natural-language flow the verification agent drives at trial time.
 
-    Only flows authored as `steps` + `expect` expand to a check; the reserved `script` and
+    Only flows authored as `actions` + `expect` expand to a check; the reserved `script` and
     `minds-ui` spellings are rejected at parse time and never reach here.
     """
 
     check_id: str = Field(description="Stable id, used as the manifest entry's id")
     name: str = Field(description="The flow's name; names its evidence directory under flows/")
-    steps: str = Field(description="Natural-language step sequence the verification agent executes")
+    actions: str = Field(
+        description="What to do in the UI, in natural language; the verification agent carries it out"
+    )
     expect: str = Field(description="The verifiable end condition the agent judges the final state against")
     surface: FlowSurface = Field(description="Where the flow enters the app; the forwarded origin in v1")
 
@@ -457,15 +461,18 @@ class StepBoundary(FrozenModel):
 
 
 class HarnessLane(LowerCaseStrEnum):
-    """A provider lane a workspace can be signed in on without a human at a device prompt.
+    """A provider lane a workspace can be signed in on with nobody present.
 
     The lane decides the harness, because that is how the product itself decides it: a chat runs on
-    the harness of the lane its account was minted on. ANTHROPIC serves claude; the rest serve
-    pi-coding, differing in whose key they take. The `openai` lane (codex) has no member here because
-    its sign-in cannot be driven by a run.
+    the harness of the lane its account was minted on. ANTHROPIC serves claude and OPENAI serves
+    codex; the rest serve pi-coding, differing in whose key they take. A lane is a member exactly
+    when it offers a pasted-key sign-in, because that is the only kind a run can drive; one whose
+    every method is a browser or device flow on a PTY needs a person at it, which is what leaves
+    `google` (antigravity) out.
     """
 
     ANTHROPIC = auto()
+    OPENAI = auto()
     API_KEY = auto()
     OPENROUTER = auto()
     OPENCODE_GO = auto()
@@ -476,6 +483,28 @@ def lane_id(lane: HarnessLane) -> str:
     """The lane as the workspace's accounts API and the command line spell it: dashes, not
     underscores (`--ak lane=api-key`)."""
     return lane.value.replace("_", "-")
+
+
+# Lanes whose harness names no model on a transcript step, so a trial on one can never confirm the
+# model it asked for. mngr's codex transcript emitter writes no per-step model name, which leaves
+# every `openai` trial's observed models empty.
+# CLEANUP: drop this set and the two renderers' branches that read it once mngr's codex transcript
+# emitter stamps a per-step model name. From then on an empty observation here means what it means
+# on every other lane -- a trial whose transcript said nothing -- and treating it as the lane's shape
+# would hide a real silence rather than a structural one.
+_LANES_WITH_NO_OBSERVABLE_MODEL: Final[frozenset[str]] = frozenset({lane_id(HarnessLane.OPENAI)})
+
+
+@pure
+def is_model_observable_on_lane(lane: str) -> bool:
+    """Whether a trial on this lane can say at all which model answered it.
+
+    False is the lane's known shape rather than anything about a given trial, which is why both
+    renderers of the confirmation ask this before reporting a model as unconfirmed: a line every
+    trial of an arm carries every night is one a reader learns to skim, and that costs the arms
+    raising it for a reason.
+    """
+    return lane not in _LANES_WITH_NO_OBSERVABLE_MODEL
 
 
 class HarnessConfig(FrozenModel):

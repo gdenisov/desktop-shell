@@ -40,8 +40,10 @@ class StepActionKind(LowerCaseStrEnum):
     """What one step does to the page.
 
     NOOP performs nothing and lets the capture report the page as it stands, which is how a caller
-    takes a look without acting. RELOAD is its own kind rather than a re-OPEN: a reload keeps the
-    URL and the session, which is exactly what a persistence flow is testing.
+    takes a look without acting. WAIT also performs nothing, but gives the page time to change
+    before the capture: it is how a flow lets a pending state (a spinner, a "saving" notice) run its
+    course without reloading. RELOAD is its own kind rather than a re-OPEN: a reload keeps the URL
+    and the session, which is exactly what a persistence flow is testing.
     """
 
     NOOP = auto()
@@ -51,6 +53,61 @@ class StepActionKind(LowerCaseStrEnum):
     INPUT = auto()
     KEYS = auto()
     SCROLL = auto()
+    WAIT = auto()
+
+
+class StepReaction(LowerCaseStrEnum):
+    """What the page's DOM did in the moments after an action, as the step script watched it.
+
+    Watched through a MutationObserver, so this is about the DOM and not the accessible tree: an
+    action the page answered with nothing but a CSS class still counts as a reaction here, while
+    the tree the driver diffs is unchanged. The two together are what let the driver tell "the
+    control is dead" from "the control acknowledged the click without showing anything new".
+
+    The observer watches the main document's tree, so NONE is that tree going untouched rather than
+    the app doing nothing: a reaction confined to a shadow root, to a subframe, or to pixels drawn
+    into a canvas is outside what it can see and reads as NONE, and so does a gesture that changes
+    only the viewport, since scrolling mutates nothing. That bound is worth knowing, because NONE is
+    the verdict the driver turns into an instruction not to repeat the action.
+
+    UNOBSERVED is what a step reports when it did not watch at all: OPEN and RELOAD wait for the
+    network instead, a bare read performs nothing to react to, and an action that failed never got
+    as far as watching. A CLICK that turns out to navigate is watched like any other click, but the
+    watch dies with the document it was installed on, so what it reports is SETTLED: the new
+    document arrived and its network went quiet. Nothing observes that document's own DOM, and the
+    capture beside the reaction is the page the click led to.
+    """
+
+    UNOBSERVED = auto()
+    # No DOM mutation arrived before the cap ran out. The positive "nothing happened" signal.
+    NONE = auto()
+    # Mutations arrived and then stopped: the page reacted and reached a stable state.
+    SETTLED = auto()
+    # Mutations were still arriving when the cap ran out: a timer, a poll, an animation.
+    STILL_CHANGING = auto()
+
+
+# How long a step waits for the page to START reacting, by how entitled it is to a reaction. A click
+# or a key press is a gesture the app is expected to answer, so its cap covers the slow renders a
+# real app has (measured up to 1.5s on batched frameworks) and its expiry means the control is
+# dead. Typing and scrolling oblige the app to nothing -- typing's own effect is the field's text,
+# which the tree shows, and a scroll's is the viewport, which neither the tree nor the DOM shows --
+# so a reaction to either is a bonus (live validation, lazy loading) and is not waited for long.
+# A WAIT action is the flow explicitly giving a pending state time, so it waits longest.
+EXPECTED_REACTION_CAP_MS = 3_000
+POSSIBLE_REACTION_CAP_MS = 1_000
+WAIT_ACTION_CAP_MS = 10_000
+# How long the DOM has to stay untouched, once it has started changing, to count as settled.
+# Comfortably longer than a frame and shorter than any perceptible pause. A first reaction that
+# arrives, pauses this long, and is followed by more (a two-phase render) is read at its first
+# stable point, which is the state a user would have seen too.
+QUIET_MS = 250
+# How long a page that has started changing but never goes quiet is given up on, counted from its
+# first mutation or from the end of the action, whichever is later. The observer is installed before
+# the action, so on a page with a timer of its own the first mutation can predate the action itself;
+# counting from it alone would let a slow action spend this whole budget before its own effect had
+# any chance to land. A tight cap, because a page with a ticker pays all of it on every step.
+SETTLE_CAP_MS = 5_000
 
 
 class StepAction(FrozenModel):
@@ -115,6 +172,9 @@ class StepResult(FrozenModel):
     title: str = Field(default="", description="The page's title after the action")
     snapshot: str = Field(default="", description="The page's ARIA tree after the action")
     screenshot_path: str = Field(default="", description="The frame written, empty when the capture failed")
+    reaction: StepReaction = Field(
+        default=StepReaction.UNOBSERVED, description="What the DOM did after the action, where the step watched"
+    )
 
 
 # Where a validation error about an action kind points.

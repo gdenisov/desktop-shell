@@ -71,6 +71,7 @@ import imbue.remote_service_connector.storage as connector_storage_module
 import imbue.remote_service_connector.suspension as suspension_module
 import imbue.remote_service_connector.suspension_admin as suspension_admin_module
 import imbue.remote_service_connector.sync as sync_mod
+import imbue.remote_service_connector.web_template_channel as web_template_channel_module
 from imbue.remote_service_connector.auth import UserAuth
 from imbue.remote_service_connector.auth import derive_user_id_prefix
 from imbue.remote_service_connector.box_scripts import CLEANUP_DELETE_FAILED_MARKER
@@ -4475,6 +4476,33 @@ def read_stable_download_link() -> str | None:
     key = hashkey()
     assert key in cache, "nothing has resolved the stable download link"
     return cache[key]
+
+
+# The feed URL tests point the web-pin reader at; nothing is ever fetched from
+# it, since every read is served from the held cache entry.
+FAKE_UPDATE_FEED_BASE_URL = "https://updates.fake-feed.example.com"
+
+
+def hold_web_template_ref(monkeypatch: pytest.MonkeyPatch, channel: str, template_ref: str | None) -> None:
+    """Configure a feed and put ``template_ref`` -- or "could not be read" -- in the web-pin cache for ``channel``.
+
+    ``POST /hosts/claim`` resolves its template tag from the feed's
+    ``<channel>-web.json`` when the tier configures a feed, so a test of that
+    path holds the entry rather than reaching a live feed.
+    """
+    monkeypatch.setenv(web_template_channel_module.UPDATE_FEED_BASE_URL_ENV_VAR, FAKE_UPDATE_FEED_BASE_URL)
+    _web_template_ref_cache()[hashkey(channel, FAKE_UPDATE_FEED_BASE_URL)] = template_ref
+
+
+def clear_web_template_refs() -> None:
+    """Drop every held web pin, so no test inherits another's channel entry."""
+    _web_template_ref_cache().clear()
+
+
+def _web_template_ref_cache() -> MutableMapping[Any, Any]:
+    cache = web_template_channel_module.cached_web_template_ref.cache
+    assert cache is not None, "the web pin resolver is not cached"
+    return cache
 
 
 def _stable_download_cache() -> MutableMapping[Any, Any]:

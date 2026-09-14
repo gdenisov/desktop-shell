@@ -212,6 +212,12 @@ _MANIFEST_PARSE_FAILURES: Final[tuple[type[Exception], ...]] = (
 _TODESKTOP_DOWNLOAD_PREFIX: Final[str] = "https://download.todesktop.com/"
 
 
+# CLEANUP: ``web_template_channel.py`` reads the release feed's
+# ``<channel>-web.json`` with its own copy of this fetch/retry/cache shape,
+# written apart from this reader so it neither depends on the per-platform
+# rewrite of it on mngr/linux-packaging (imbue-ai/mngr-internal#943) nor
+# conflicts with it textually. Consolidate the two into one feed reader once
+# both branches are on main -- owed by whichever merges second.
 @retry(
     retry=retry_if_exception_type(_MANIFEST_FETCH_FAILURES),
     stop=stop_after_attempt(_STABLE_CHANNEL_FETCH_ATTEMPTS),

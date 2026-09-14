@@ -135,6 +135,23 @@ deploy was deliberately not done.
   `minds-v0.5.0`. Until this deploys, keep `available` rows at `minds-v0.4.3`
   -- `/hosts/claim` matches the tag exactly and has no rebuild fallback.
 
+  From `mngr/remote-workspace-fixes` on, the connector reads the web pin from
+  the release feed's `<channel>-web.json` (`[web_channels.*]` in
+  `apps/minds/release-channels.toml`, published by the channels workflow when
+  that branch merges) and uses `FALLBACK_BRANCH` only while the feed cannot be
+  read, so this coupling ends with that deploy. Before deploying: confirm
+  every `curl -s https://updates.imbueminds.com/<channel>-web.json` (stable,
+  beta, alpha) names a tag the production pool has `available` rows at -- the
+  deployed connector leases exactly what each channel's file says (the entries
+  land at `minds-v0.5.2`, matching desktop stable); repoint the web channels
+  there if one does not. After deploying: exercise a web create from the chrome on each
+  channel and check the connector log for `Could not read the web pin`
+  (a feed read problem) or `No web pin published` (a channel file missing).
+  Also check the three Modal web functions (`rsc-production` `api`,
+  `llm-production` `proxy`, `oauth-redirector-production` `redirect`) show a
+  `us` region in `modal app describe`, and that a lease/stop cycle against a
+  gen-2 box still works through the proxy.
+
 - [ ] **Promote 0.5.0 past alpha.** Beta and stable are still 0.4.2 (build
   `260825un55i8ix7`), so most users are two releases behind. The 0.5.0 build is
   `260902shwco3ynx`.
@@ -145,7 +162,9 @@ deploy was deliberately not done.
   leaving it *ahead* of stable is unrecoverable, since `allowDowngrade` is false.
 
 - [ ] **Bake the production pool at whatever tag is promoted**, before the
-  services deploy that pins to it.
+  `[web_channels.*]` repoint that pins browser creates to it
+  ([ops/app-release.md](./ops/app-release.md) step 9b). The services deploy no
+  longer pins to it: it reads the feed, so it goes first.
 
 - [ ] **Staging management-plane lockdown** before staging's first gen-2 box
   takes workspaces: Modal proxy, the `[management_plane]` table in `envs/staging/deploy.toml`,
