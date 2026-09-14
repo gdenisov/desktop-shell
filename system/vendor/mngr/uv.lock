@@ -23,6 +23,7 @@ members = [
     "imbue-minds-admin",
     "imbue-mngr",
     "imbue-mngr-antigravity",
+    "imbue-mngr-autocompact",
     "imbue-mngr-aws",
     "imbue-mngr-azure",
     "imbue-mngr-behaviors",
@@ -2624,6 +2625,17 @@ requires-dist = [
 name = "imbue-mngr-antigravity"
 version = "0.1.8"
 source = { editable = "libs/mngr_antigravity" }
+dependencies = [
+    { name = "imbue-mngr" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
+
+[[package]]
+name = "imbue-mngr-autocompact"
+version = "0.1.0"
+source = { editable = "libs/mngr_autocompact" }
 dependencies = [
     { name = "imbue-mngr" },
 ]

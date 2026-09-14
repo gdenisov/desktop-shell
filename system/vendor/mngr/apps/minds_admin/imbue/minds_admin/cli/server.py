@@ -243,6 +243,7 @@ from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import compute_machine_vc
 from imbue.mngr_imbue_cloud.slices.gen2_scripts.sizing import is_allowed_machine_units
 from imbue.mngr_imbue_cloud.slices.slice_client import build_slice_vm_client
 from imbue.mngr_imbue_cloud.slices.ssh_box_image_cache import SshBoxImageCache
+from imbue.mngr_imbue_cloud.wire_types import WorkspaceStopKind
 from imbue.mngr_lima.constants import DEFAULT_IMAGE_URL_X86_64
 from imbue.mngr_lima.errors import LimaCommandError
 from imbue.mngr_ovh.client import build_ovh_client
@@ -3973,7 +3974,11 @@ def drain_server(
         admin_key = resolve_admin_api_key(api_key)
         for leased_row_id in leased_row_ids:
             try:
-                stop_result_by_row_id[leased_row_id] = client.admin_stop_workspace(admin_key, leased_row_id)
+                # A drain frees capacity; the owner's next start restores the
+                # workspace onto a surviving box, so its stop stays theirs to end.
+                stop_result_by_row_id[leased_row_id] = client.admin_stop_workspace(
+                    admin_key, leased_row_id, WorkspaceStopKind.IDLE
+                )
             except ImbueCloudConnectorError as exc:
                 logger.warning("Force-stop of leased workspace {} failed: {}", leased_row_id, exc)
                 stop_result_by_row_id[leased_row_id] = {"error": str(exc)}

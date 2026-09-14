@@ -48,6 +48,7 @@ def _click(target: str, role: str = "button") -> ui_flows.FlowAction:
         kind=ui_flows.FlowActionKind.CLICK,
         role=role,
         target=target,
+        ref="",
         text="",
         amount=0,
         reasoning="the control is on the page",
@@ -55,11 +56,47 @@ def _click(target: str, role: str = "button") -> ui_flows.FlowAction:
     )
 
 
+def _click_ref(ref: str, role: str) -> ui_flows.FlowAction:
+    return ui_flows.FlowAction(
+        kind=ui_flows.FlowActionKind.CLICK,
+        role=role,
+        target="",
+        ref=ref,
+        text="",
+        amount=0,
+        reasoning="the control has no name, so its ref is the only handle",
+        expected="the page reflects the click",
+    )
+
+
+def _ref_on(line: str) -> str:
+    """The ref a snapshot line prints: `- checkbox [ref=e8]` gives `e8`."""
+    return line.split("[ref=")[1].split("]")[0]
+
+
+def _ref_of(state_text: str, line_marker: str) -> str:
+    """The ref the captured state prints on the first line holding `line_marker`."""
+    return _ref_on(next(line for line in state_text.splitlines() if line_marker in line))
+
+
+def _checkbox_ref_of_row(state_text: str, task_text: str) -> str:
+    """The ref of the nameless checkbox on the row whose text is `task_text`: the last checkbox
+    the tree lists before that text."""
+    checkbox_ref = ""
+    for line in state_text.splitlines():
+        if "- checkbox" in line:
+            checkbox_ref = _ref_on(line)
+        if task_text in line:
+            return checkbox_ref
+    raise AssertionError("no row holds {!r}".format(task_text))
+
+
 def _type(text: str, target: str = "New task") -> ui_flows.FlowAction:
     return ui_flows.FlowAction(
         kind=ui_flows.FlowActionKind.INPUT,
         role="textbox",
         target=target,
+        ref="",
         text=text,
         amount=0,
         reasoning="the field is on the page",
@@ -72,6 +109,7 @@ def _reload() -> ui_flows.FlowAction:
         kind=ui_flows.FlowActionKind.RELOAD,
         role="",
         target="",
+        ref="",
         text="",
         amount=0,
         reasoning="checking persistence",
@@ -84,6 +122,7 @@ def _wait() -> ui_flows.FlowAction:
         kind=ui_flows.FlowActionKind.WAIT,
         role="",
         target="",
+        ref="",
         text="",
         amount=0,
         reasoning="the page says it is saving",
@@ -315,6 +354,82 @@ def test_a_navigation_that_lands_while_the_watch_is_waiting_is_read_the_same_way
     assert '"Buy milk"' in navigated.state_text
 
 
+def test_a_nameless_control_is_addressed_by_its_ref_and_the_next_step_reads_fresh_refs(
+    local_browser: str, flow_lab_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    # Under ?unnamed=1 a task's checkbox has no accessible name: the tree lists a bare `checkbox`,
+    # and the ref it prints is the only handle the page gives. The second ref is read off the state
+    # the ref step itself captured, which is what pins that a capture after a ref lookup numbers the
+    # page the way the next step's own lookup will.
+    executor = _executor(local_browser, flow_lab_group, tmp_path)
+    with flow_lab.serve_static_app(_TODO_APP) as origin:
+
+        async def drive() -> list[ui_flows.StepOutcome]:
+            outcomes = await _drive(executor, origin + "?unnamed=1", [_type("walk dog"), _click("Add")])
+            checkbox_ref = _checkbox_ref_of_row(outcomes[-1].state_text, "walk dog")
+            outcomes.append(await executor.run_step(_click_ref(checkbox_ref, "checkbox"), 3))
+            completed = outcomes[-1].state_text
+            outcomes.append(await executor.run_step(_click_ref(_ref_of(completed, 'Delete \\"walk dog'), "button"), 4))
+            return outcomes
+
+        outcomes = asyncio.run(drive())
+
+    added, completed, deleted = outcomes[2], outcomes[3], outcomes[4]
+    assert "- checkbox [ref=" in added.state_text and 'checkbox "' not in added.state_text
+    assert (completed.is_ok, completed.reaction) == (True, StepReaction.SETTLED), completed.detail
+    assert "[checked]" in completed.state_text and "walk dog" in completed.state_text
+    assert (deleted.is_ok, deleted.reaction) == (True, StepReaction.SETTLED), deleted.detail
+    assert "walk dog" not in deleted.state_text
+
+
+def test_a_ref_that_no_longer_names_what_the_agent_read_is_a_step_error_the_flow_survives(
+    local_browser: str, flow_lab_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    # A ref is checked against a fresh snapshot before it is acted on: one that sits on another
+    # role now, or on nothing, is refused with the page captured as it stands, so the flow carries
+    # on from the current state rather than clicking whatever inherited the number.
+    outcomes = _drive_todo(local_browser, flow_lab_group, tmp_path, "?unnamed=1", [])
+    checkbox_ref = _ref_of(outcomes[0].state_text, "- checkbox")
+
+    executor = _executor(local_browser, flow_lab_group, tmp_path)
+    moved = asyncio.run(executor.run_step(_click_ref(checkbox_ref, "button"), 1))
+    gone = asyncio.run(executor.run_step(_click_ref("e999", "checkbox"), 2))
+
+    assert (moved.is_ok, moved.reason) == (False, ui_flows.REASON_STALE_REF)
+    assert not ui_flows.is_instrument_reason(moved.reason)
+    assert "names a checkbox now, not a button" in moved.detail
+    assert (gone.is_ok, gone.reason) == (False, ui_flows.REASON_STALE_REF)
+    assert "e999 is not on the page any more" in gone.detail
+    # The page below is still captured, and still the page the flow can go on from.
+    assert "Buy milk" in moved.state_text and "Buy milk" in gone.state_text
+
+
+def test_an_unusable_decision_is_recorded_as_a_step_that_did_not_run(chromium_path: Path, tmp_path: Path) -> None:
+    # The flow ends on the instrument, but the log still shows the page the decision was made on
+    # and why nothing could be done with it, rather than stopping after a step that worked.
+    agent = ScriptedVerificationAgent(actions=[None], readings=[reading()])
+    output_dir = tmp_path / "flow"
+
+    run = asyncio.run(
+        flow_lab.run_lab_flow(
+            app_dir=_TODO_APP,
+            page="",
+            check=flow_lab.lab_flow_check("add_complete_delete", _ADD_COMPLETE_DELETE_STEPS, "'walk dog' is gone"),
+            agent=agent,
+            output_dir=output_dir,
+            chromium_path=chromium_path,
+        )
+    )
+
+    assert (run.status, run.reason) == (CheckStatus.ERROR, ui_flows.REASON_VERIFIER_AGENT_FAILED)
+    assert run.detail == "the verification agent returned no usable action: the model call produced no tool payload"
+    records = [json.loads(line) for line in (output_dir / "log.jsonl").read_text().splitlines()]
+    assert [record["kind"] for record in records] == ["init", "action"]
+    assert records[1]["action"] == ui_flows.UNUSABLE_ACTION
+    assert records[1]["error"] == run.detail
+    assert "Buy milk" in records[1]["state"]
+
+
 def test_a_scripted_flow_runs_to_completion_and_leaves_a_trials_evidence(chromium_path: Path, tmp_path: Path) -> None:
     # The whole loop -- opening, deciding, acting, summarising, reading -- against the fixture, with
     # the agent's decisions scripted so the record is a function of the executor alone.
@@ -365,12 +480,13 @@ def test_a_scripted_flow_runs_to_completion_and_leaves_a_trials_evidence(chromiu
 # so a stuck run is stopped by the flow deadline -- with a reason and a full record -- rather than
 # by pytest's clock, and the grace covers the browser launch and the static server outside it.
 @pytest.mark.timeout(flow_runner.FLOW_DEADLINE_SECONDS + 60)
-@pytest.mark.parametrize("page", ["?latency=300", "?pending=2000"])
+@pytest.mark.parametrize("page", ["?latency=300", "?pending=2000", "?unnamed=1"])
 def test_the_real_agent_completes_the_flow_without_reloading(chromium_path: Path, tmp_path: Path, page: str) -> None:
-    """Two shapes of a slow app: one that reacts 300ms after each click (the matrix smoke runs on PR
-    #900), and one that answers each click with a pending state and applies it two seconds later.
-    Both are the declared actions carried out with no reload, which the flow did not ask for and
-    which a waiting agent does not need.
+    """Three shapes of a real app: one that reacts 300ms after each click (the matrix smoke runs on
+    PR #900), one that answers each click with a pending state and applies it two seconds later, and
+    one whose checkbox has no accessible name. All three are the declared actions carried out with
+    no reload, which the flow did not ask for and which a waiting agent does not need; the last is
+    also the nameless control addressed by its ref rather than the agent giving up on it.
 
     A run needs ANTHROPIC_API_KEY, spends a few model calls, and is not deterministic, so it is a
     release test rather than a per-PR one.
@@ -396,5 +512,8 @@ def test_the_real_agent_completes_the_flow_without_reloading(chromium_path: Path
     )
 
     assert (run.status, run.reason) == (CheckStatus.PASSED, ""), run.detail
-    actions = [json.loads(line)["action"] for line in run.records if json.loads(line)["kind"] == "action"]
+    records = [json.loads(line) for line in run.records if json.loads(line)["kind"] == "action"]
+    actions = [record["action"] for record in records]
     assert "reload the page" not in actions, actions
+    if page == "?unnamed=1":
+        assert any(record["target_ref"] for record in records), actions

@@ -30,6 +30,7 @@ def test_an_action_record_renders_as_its_step_in_the_agents_history() -> None:
     record = ui_flows.flow_step_record(
         3,
         'click the button named "Add"',
+        "",
         "the control is on the page",
         "the task is listed",
         'new: - listitem: "walk dog"',
@@ -49,6 +50,7 @@ def test_a_step_that_did_not_run_renders_with_its_error() -> None:
     record = ui_flows.flow_step_record(
         4,
         'click the button named "Delete"',
+        "",
         "",
         "the task is gone",
         "",

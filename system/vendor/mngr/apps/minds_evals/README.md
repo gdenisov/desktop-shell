@@ -545,10 +545,12 @@ workspace can provide it:
   usage source, and the [arm](#what-the-arm-records) the trial ran on.
 - Background workers the agent launched through the launch-task skill (`create_worker.py launch
   --name <x>`, a separate mngr agent in the same workspace) are discovered from the launch commands
-  in its own stream, captured one by one (`mngr transcript` for a worker still in place, mngr's
-  preserved copy of the stream for one destroyed after finishing), and embedded in `trajectory.json`
-  under the launching call as ATIF `subagent_trajectories` with `subagent_kind: "mngr"` and an
-  `extra.worker` block. Launches are followed three levels deep: the chat agent's workers, their
+  in its own stream, captured one by one with a preservation-aware `mngr transcript` lookup (which
+  reaches a worker destroyed after finishing, and retries without it on a workspace mngr too old to
+  know the flag), and embedded in `trajectory.json` under the launching call as ATIF
+  `subagent_trajectories` with `subagent_kind: "mngr"` and an `extra.worker` block. A worker a
+  complete listing no longer names, whose stream the capture still produced, is recorded as
+  destroyed; anything less conclusive is recorded as unknown. Launches are followed three levels deep: the chat agent's workers, their
   workers, and theirs. The report each worker pushed back to its lead is captured beside it.
 - `metadata.trajectory_source` (`workspace`, `hand_built`, or `none`) and
   `metadata.transcript_capture` say which shape the file has and, when the capture failed, why;
@@ -997,7 +999,7 @@ kinds of row:
   complete alone: the app registry as it actually stood (the only source that sees a template app
   registering its port from inside the program its supervisord entry runs -- its own entry point,
   or a launcher script -- as the terminal and the owner-exec and vm-exec daemons do), unioned with
-  the names the workspace's own `system/supervisord.conf` registers through its `forward_port.py`
+  the names the workspace's own supervisord config registers through its `forward_port.py`
   invocations (`--name`, or the block's own program name for a `--manifest` registration), which
   covers a template app whose service had not registered its port yet. Measuring beats a hand-maintained
   name list, so the set stays correct for a dwt fork or branch that ships extra apps. The manifest
@@ -1017,10 +1019,30 @@ nothing). The registry and service capture still happens either way.
 
 A registry name is not a supervisord program name -- a multi-port app registers extra origin rows
 (`<name>-admin`) that no program owns. The service-health check joins a row to its program through
-the `forward_port.py` invocations inside each `[program:*]` block of `system/supervisord.conf`, and
-falls back to a program named exactly like the row, which covers a service that registers its port
-at runtime instead of from the config. A row with neither is recorded as `no_supervised_program`:
-the app was started by hand and would not survive a restart.
+the `forward_port.py` invocations inside each `[program:*]` block of the workspace's supervisord
+config, and falls back to a program named exactly like the row, which covers a service that
+registers its port at runtime instead of from the config. A row with neither is recorded as
+`no_supervised_program`: the app was started by hand and would not survive a restart.
+
+That config is `system/supervisord.conf` plus every `system/supervisord.conf.d/*.conf` beside it:
+the default template declares each program in its own drop-in there, and its layout test pins
+that directory as the one its `[include]` glob names, so the capture reads the directory by name
+rather than parsing the glob. Reading the main file alone finds no `[program:*]` at all, so the
+join is empty. The service-health check mostly survives that on its same-name fallback, but a multi-port
+app's extra origin rows (`<name>-admin`) own no program of their own and are recorded
+`no_supervised_program`. The costlier half is `resolve_preexisting_registrations`, which has no
+fallback: a template app whose service had not registered its port when the snapshot was taken
+then appears in neither half of the pre-existing set, so it is scored as something the agent
+delivered. An app-free workspace gives the same empty answer, so neither shortfall could be
+told from a true negative -- which is what the capture checks for separately. supervisord runs
+what its config declares, so a `supervisorctl status` listing that names programs while the
+captured config declares no `[program:*]` or `[eventlistener:*]` section at all is a read that
+missed part of the config. The pre-existing set is then **unknown** rather than one that
+silently omits a template app, and a row whose owning program could not be resolved is recorded
+`error` with reason `supervisord_conf_unreadable` rather than `no_supervised_program` -- an
+unmeasured row instead of one scored against the agent. The check keys on declared sections
+rather than on `forward_port.py` calls, so a template whose apps all register their ports at
+runtime, and whose config therefore registers nothing, is not mistaken for a broken read.
 
 ## UI flows
 
@@ -1058,7 +1080,20 @@ origin, session cookie -- rather than under it. The browser is armed before its 
 with the trial's pre-auth cookie, scoped the way the proxy scopes its own: to the workspace's whole
 origin family, so a flow stays authenticated wherever under it the app sends the browser. Elements
 are addressed by ARIA role and accessible name, taken from Playwright's `aria_snapshot`, which is
-also what the flow log records verbatim for the judge.
+also what the flow log records verbatim for the judge. An element the tree lists with no name at all
+(a checkbox with no label, say) is addressed by the ref the snapshot prints for it (`[ref=e9]`); the
+step script checks the ref against a fresh snapshot of the page before acting on it and refuses one
+that no longer sits on the role the agent read, so a page that changed in between costs the flow one
+recorded step rather than a click on whatever inherited the number. Such a step carries the ref on
+its `log.jsonl` line as `target_ref`, and the judge's digest marks it and says what the mark means: a
+control with no accessible name is an accessibility defect of the delivered app, recorded for a
+measure of its own and, unless the declared actions or the `expect` call for accessibility, not
+counted against the flow.
+
+A decision the agent makes that cannot be acted on -- an action that does not exist, an element
+addressed by neither name nor ref -- ends the flow as an instrument error, with the decision's own
+words in the driver log, in the manifest entry's detail, and on a `(no usable action)` step in the
+flow log that shows the page the decision was made on.
 
 The verification agent's spend is reported as `metadata.verifier_agent_usage`, beside
 `decider_usage` and never folded into the agent's own cost fields. It runs on the decider's model by
@@ -1133,7 +1168,9 @@ milliseconds after the action (the shape of any framework that batches updates),
 answers every change with a "Saving..." status first and applies it that many milliseconds later
 (the shape of an app talking to a backend), `?arm_delete=1` makes delete a two-click control whose
 first click is acknowledged by a highlight and nothing else, `?dedupe=ci` drops a case-insensitive
-duplicate without saying so, and `?ticker=1` keeps a clock repainting so the DOM never goes quiet.
+duplicate without saying so, `?ticker=1` keeps a clock repainting so the DOM never goes quiet, and
+`?unnamed=1` gives each task's checkbox no label association, so the tree lists it with no name and
+the ref is the only handle the page offers.
 Its "Start over" link is a real navigation, for the step that has to survive one -- immediately, or,
 under `?pending=<ms>`, only after the click has been acknowledged, which is the redirect that lands
 while the step is still watching the page it is about to lose. `test_flow_lab.py` pins what the
