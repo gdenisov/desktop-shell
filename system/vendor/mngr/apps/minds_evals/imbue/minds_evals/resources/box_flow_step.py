@@ -16,7 +16,11 @@ classifies by the reported reason and a traceback on stderr would read as a brid
 
 import sys
 from typing import Any
+from typing import assert_never
 
+from flow_step_protocol import EXPECTED_REACTION_CAP_MS
+from flow_step_protocol import POSSIBLE_REACTION_CAP_MS
+from flow_step_protocol import QUIET_MS
 from flow_step_protocol import REASON_ACTION_TIMED_OUT
 from flow_step_protocol import REASON_CDP_CONNECT_FAILED
 from flow_step_protocol import REASON_FORWARD_UNREACHABLE
@@ -24,11 +28,14 @@ from flow_step_protocol import REASON_STEP_ERROR
 from flow_step_protocol import REASON_TLS_REFUSED
 from flow_step_protocol import REASON_TUNNEL_DOWN
 from flow_step_protocol import REASON_UNKNOWN_ACTION
+from flow_step_protocol import SETTLE_CAP_MS
 from flow_step_protocol import StepAction
 from flow_step_protocol import StepActionKind
 from flow_step_protocol import StepCookie
+from flow_step_protocol import StepReaction
 from flow_step_protocol import StepRequest
 from flow_step_protocol import StepResult
+from flow_step_protocol import WAIT_ACTION_CAP_MS
 from flow_step_protocol import request_error_reason
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -48,6 +55,14 @@ class MissingContextError(Exception):
     """The connected browser exposes no context at all -- an instrument failure, not an app one."""
 
 
+class ReactionWatchError(Exception):
+    """The script that watches the page for a reaction threw inside the browser.
+
+    That script is this file's own JavaScript running in a world of its own, so an exception there
+    is a bug in the instrument and is reported as one, never as the app failing to react.
+    """
+
+
 # How the page is rendered for the verification agent. "ai" is Playwright's denser LLM-oriented
 # rendering of the same ARIA tree, which is what the host-side loop reads.
 _SNAPSHOT_MODE = "ai"
@@ -55,9 +70,71 @@ _DEFAULT_TIMEOUT_MS = 15_000
 # A navigation waits for the network to settle, since an app that renders from a fetch has nothing
 # on the page at DOMContentLoaded. Capped well under the step's own budget.
 _NAVIGATION_TIMEOUT_MS = 30_000
+# How long a navigation an action started, but that has not replaced the document yet, is given to do
+# so. The commit follows within milliseconds, so this only has to be long enough not to be beaten by
+# a loaded machine; when it expires there was no new url coming and the page as it stands is the one
+# to read.
+_NAVIGATION_COMMIT_TIMEOUT_MS = 2_000
 # How much of an error's text travels back: enough to diagnose, bounded so one exception cannot
 # crowd the page state out of the flow log.
 _MAX_DETAIL_CHARS = 2000
+
+# The reaction watch runs in an isolated world of its own on the page's main frame, the way
+# Playwright's own instrumentation does: it shares the document, so it sees every mutation, but not
+# the page's JavaScript globals, so nothing of it is visible to the app and the app cannot interfere
+# with it. Two evaluations in that world bracket the action -- an observer installed before it, a
+# waiter run after it -- so a reaction that lands synchronously inside the click handler is counted
+# rather than missed.
+_REACTION_WORLD_NAME = "minds-evals-reaction-watch"
+_INSTALL_OBSERVER_JS = """
+(() => {
+  const state = { mutationCount: 0, firstMutationAt: 0, lastMutationAt: 0 };
+  const observer = new MutationObserver((records) => {
+    const now = performance.now();
+    if (state.mutationCount === 0) state.firstMutationAt = now;
+    state.mutationCount += records.length;
+    state.lastMutationAt = now;
+  });
+  observer.observe(document.documentElement, {
+    subtree: true, childList: true, attributes: true, characterData: true,
+  });
+  globalThis.__mindsEvalsReactionWatch = { state, observer };
+})()
+"""
+# Resolves to a StepReaction value. Polled rather than driven by the observer itself, because the
+# verdict depends on time passing with NO callbacks: the observer cannot announce its own silence.
+_WAIT_FOR_REACTION_JS = """
+new Promise((resolve) => {
+  const watch = globalThis.__mindsEvalsReactionWatch;
+  const startedAt = performance.now();
+  const settleWith = (verdict) => { watch.observer.disconnect(); resolve(verdict); };
+  const tick = () => {
+    const now = performance.now();
+    const state = watch.state;
+    if (state.mutationCount === 0) {
+      if (now - startedAt >= %(first_cap_ms)d) return settleWith("none");
+    } else if (now - state.lastMutationAt >= %(quiet_ms)d) {
+      return settleWith("settled");
+    } else if (now - Math.max(state.firstMutationAt, startedAt) >= %(settle_cap_ms)d) {
+      return settleWith("still_changing");
+    }
+    setTimeout(tick, %(poll_ms)d);
+  };
+  tick();
+})
+"""
+_REACTION_POLL_MS = 25
+# What Chromium answers when the document the watch's world belongs to is gone. All three spellings
+# are the same event and all three happen: the first when the world was already gone as the
+# evaluation was dispatched, the other two when it died with an evaluation waiting on it -- an app
+# that reacts and only then redirects. A world dies with its document, so after an action this means
+# one thing: the action navigated. A target that was genuinely closed rather than navigated fails
+# instead on the load-state wait that follows, and is reported from there.
+_CONTEXT_GONE_MARKERS = (
+    "cannot find context",
+    "execution context was destroyed",
+    "inspected target navigated or closed",
+)
 
 
 def _transport_reason(message: str) -> str:
@@ -84,9 +161,10 @@ def classify_exception(exc: BaseException) -> str:
 
     Type is what separates the three things a step can mean, and prose cannot: a timeout is the
     page failing to offer what was asked for (the app's shortfall), an unknown action kind is the
-    harness contradicting itself, and everything else out of the executor is the executor. Only
-    within a Playwright error does the message get a say, and only to name which transport hop
-    broke -- an unrecognised one stays an executor failure rather than being charged to the app.
+    harness contradicting itself, and everything else out of the executor -- the reaction watch
+    included -- is the executor. Only within a Playwright error does the message get a say, and only
+    to name which transport hop broke -- an unrecognised one stays an executor failure rather than
+    being charged to the app.
     """
     if isinstance(exc, UnknownActionError):
         return REASON_UNKNOWN_ACTION
@@ -95,6 +173,22 @@ def classify_exception(exc: BaseException) -> str:
     if isinstance(exc, PlaywrightError):
         return _transport_reason(str(exc)) or REASON_STEP_ERROR
     return REASON_STEP_ERROR
+
+
+def reaction_cap_ms(kind: StepActionKind) -> int | None:
+    """How long a step of this kind waits for the page to start reacting, or None when it does not
+    watch: a navigation waits for the network instead, and a bare read has nothing to react to."""
+    match kind:
+        case StepActionKind.NOOP | StepActionKind.OPEN | StepActionKind.RELOAD:
+            return None
+        case StepActionKind.CLICK | StepActionKind.KEYS:
+            return EXPECTED_REACTION_CAP_MS
+        case StepActionKind.INPUT | StepActionKind.SCROLL:
+            return POSSIBLE_REACTION_CAP_MS
+        case StepActionKind.WAIT:
+            return WAIT_ACTION_CAP_MS
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _bounded(exc: BaseException) -> str:
@@ -117,9 +211,10 @@ def _playwright_cookie(cookie: StepCookie) -> dict[str, Any]:
 def _perform(page: Any, action: StepAction) -> None:
     """Carry out one decided action. A kind with no branch here raises rather than silently doing
     nothing: the caller reports that as the harness contradicting itself, not as the app failing."""
-    if action.kind is StepActionKind.NOOP:
-        # Perform nothing and let the capture report the page as it stands. That is how a caller
-        # takes a look without acting.
+    if action.kind is StepActionKind.NOOP or action.kind is StepActionKind.WAIT:
+        # Perform nothing and let the capture report the page as it stands. NOOP is how a caller
+        # takes a look without acting; WAIT is the same look, after the reaction watch has given
+        # the page its time.
         return
     if action.kind is StepActionKind.OPEN:
         page.goto(action.text, wait_until="networkidle", timeout=_NAVIGATION_TIMEOUT_MS)
@@ -144,6 +239,97 @@ def _perform(page: Any, action: StepAction) -> None:
     raise UnknownActionError("no branch performs action kind {!r}".format(action.kind.value))
 
 
+def _evaluate_in_world(cdp_session: Any, context_id: int, expression: str, is_promise: bool) -> Any:
+    """Run one expression in the reaction watch's world and return its value."""
+    reply = cdp_session.send(
+        "Runtime.evaluate",
+        {
+            "expression": expression,
+            "contextId": context_id,
+            "awaitPromise": is_promise,
+            "returnByValue": True,
+        },
+    )
+    if "exceptionDetails" in reply:
+        raise ReactionWatchError(str(reply["exceptionDetails"].get("text") or reply["exceptionDetails"]))
+    return reply["result"].get("value")
+
+
+def _install_reaction_watch(cdp_session: Any) -> int:
+    """Create the watch's world on the main frame, install the observer there, and return the
+    world's context id for the waiter to address."""
+    frame_id = cdp_session.send("Page.getFrameTree")["frameTree"]["frame"]["id"]
+    context_id = cdp_session.send(
+        "Page.createIsolatedWorld", {"frameId": frame_id, "worldName": _REACTION_WORLD_NAME}
+    )["executionContextId"]
+    _evaluate_in_world(cdp_session, context_id, _INSTALL_OBSERVER_JS, is_promise=False)
+    return context_id
+
+
+def _is_context_gone(exc: PlaywrightError) -> bool:
+    """Whether a protocol error says the world the evaluation named no longer exists."""
+    lowered = str(exc).lower()
+    return any(marker in lowered for marker in _CONTEXT_GONE_MARKERS)
+
+
+def _settle_after_navigation(page: Any, url_before: str) -> None:
+    """Wait for the document the action navigated to, and for its network to go quiet.
+
+    A world that dies while the waiter is evaluating in it is Chromium failing that evaluation as the
+    navigation STARTS: the new document has not committed yet, so the page here is still the one the
+    action is about to replace and waiting on its load state alone would return at once and have the
+    capture record the wrong page. Waiting for the URL to become a different one covers that, and
+    returns immediately when the navigation had already committed before the waiter was asked. A
+    navigation to the SAME url has nothing to wait for either way, which is the expiry the fall-back
+    is for.
+    """
+    try:
+        page.wait_for_url(
+            lambda url: url != url_before, wait_until="networkidle", timeout=_NAVIGATION_COMMIT_TIMEOUT_MS
+        )
+    except PlaywrightTimeoutError:
+        page.wait_for_load_state("networkidle", timeout=_NAVIGATION_TIMEOUT_MS)
+
+
+def _wait_for_reaction(
+    page: Any, cdp_session: Any, context_id: int, first_cap_ms: int, url_before: str
+) -> StepReaction:
+    """What the DOM did after the action, read once it has settled or the caps have run out."""
+    waiter = _WAIT_FOR_REACTION_JS % {
+        "first_cap_ms": first_cap_ms,
+        "quiet_ms": QUIET_MS,
+        "settle_cap_ms": SETTLE_CAP_MS,
+        "poll_ms": _REACTION_POLL_MS,
+    }
+    try:
+        verdict = _evaluate_in_world(cdp_session, context_id, waiter, is_promise=True)
+    except PlaywrightError as exc:
+        if not _is_context_gone(exc):
+            raise
+        # The world died with its document, so the action navigated. The new document is the
+        # reaction, read the way an explicit navigation is read: once its network has settled.
+        _settle_after_navigation(page, url_before)
+        return StepReaction.SETTLED
+    return StepReaction(verdict)
+
+
+def _perform_and_watch(page: Any, cdp_session: Any, action: StepAction) -> StepReaction:
+    """Carry out the action and, for the kinds that watch, wait for the page's reaction to it.
+
+    The observer goes in BEFORE the action so a reaction that lands inside the event handler is
+    counted; a watch installed afterwards would report the commonest case -- a synchronous render
+    -- as no reaction at all.
+    """
+    first_cap_ms = reaction_cap_ms(action.kind)
+    if first_cap_ms is None:
+        _perform(page, action)
+        return StepReaction.UNOBSERVED
+    context_id = _install_reaction_watch(cdp_session)
+    url_before = page.url
+    _perform(page, action)
+    return _wait_for_reaction(page, cdp_session, context_id, first_cap_ms, url_before)
+
+
 def run_step(request: StepRequest) -> StepResult:
     """Connect, act, capture. Returns the result printed on stdout."""
     with sync_playwright() as playwright:
@@ -163,9 +349,10 @@ def run_step(request: StepRequest) -> StepResult:
             page = context.pages[0] if context.pages else context.new_page()
             reason = ""
             detail = ""
+            reaction = StepReaction.UNOBSERVED
             try:
-                _perform(page, request.action)
-            except (PlaywrightError, UnknownActionError) as exc:
+                reaction = _perform_and_watch(page, context.new_cdp_session(page), request.action)
+            except (PlaywrightError, UnknownActionError, ReactionWatchError) as exc:
                 # The action failed, but the PAGE is still readable -- and what it shows is the
                 # most useful thing the flow can record, so capture it before returning.
                 reason = classify_exception(exc)
@@ -183,6 +370,7 @@ def run_step(request: StepRequest) -> StepResult:
                 title=capture.title,
                 snapshot=capture.snapshot,
                 screenshot_path=capture.screenshot_path,
+                reaction=reaction,
             )
         finally:
             # Only the CDP connection is closed. Closing the browser would end the session the next

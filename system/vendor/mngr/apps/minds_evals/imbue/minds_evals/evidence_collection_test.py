@@ -27,6 +27,7 @@ from imbue.minds_evals.mock_verification_agent_test import ScriptedVerificationA
 from imbue.minds_evals.mock_verification_agent_test import click_action
 from imbue.minds_evals.mock_verification_agent_test import done_action
 from imbue.minds_evals.mock_verification_agent_test import reading
+from imbue.minds_evals.resources.flow_step_protocol import StepReaction
 from imbue.minds_evals.testing import BOX_COMMON_TRANSCRIPT_PATH
 from imbue.minds_evals.testing import BOX_WORKSPACE_TRAJECTORY_PATH
 from imbue.minds_evals.testing import CHAT_WORK_DIR
@@ -1457,7 +1458,9 @@ def test_the_oracle_flow_log_carries_every_record_kind() -> None:
     # so a reader path it never exercises is a path nothing green ever proves.
     case = _case_config(
         _authored(
-            ui_flows=[{"name": "add-complete-delete", "steps": "Add 'buy milk'.", "expect": "'buy milk' is visible."}]
+            ui_flows=[
+                {"name": "add-complete-delete", "actions": "Add 'buy milk'.", "expect": "'buy milk' is visible."}
+            ]
         )
     )
 
@@ -1484,11 +1487,15 @@ def test_oracle_evidence_inventory_satisfies_declared_file_globs() -> None:
 
 
 _FLOWS = [
-    {"name": "add-complete-delete", "steps": "Add 'buy milk'. Delete 'walk dog'.", "expect": "'buy milk' is visible."},
+    {
+        "name": "add-complete-delete",
+        "actions": "Add 'buy milk'. Delete 'walk dog'.",
+        "expect": "'buy milk' is visible.",
+    },
 ]
 _TWO_FLOWS = [
     *_FLOWS,
-    {"name": "persistence", "steps": "Add 'persist me'. Reload.", "expect": "'persist me' survived."},
+    {"name": "persistence", "actions": "Add 'persist me'. Reload.", "expect": "'persist me' survived."},
 ]
 _PAGE_SNAPSHOT = "- textbox 'Add a task'\n- button 'Add'"
 
@@ -1499,6 +1506,7 @@ def _step_result(
     detail: str = "",
     snapshot: str = _PAGE_SNAPSHOT,
     screenshot_path: str = "/logs/agent/verification/flows/add_complete_delete/step_000.png",
+    reaction: StepReaction = StepReaction.SETTLED,
 ) -> ExecResult:
     """What the box-side step script prints: one JSON object describing the step's outcome."""
     return ok_result(
@@ -1511,6 +1519,9 @@ def _step_result(
                 "title": "Todo",
                 "snapshot": snapshot,
                 "screenshot_path": screenshot_path,
+                # An action that never landed never got as far as watching the page, so the script
+                # cannot report a reaction whatever this stands in for.
+                "reaction": (reaction if is_ok else StepReaction.UNOBSERVED).value,
             }
         )
     )
@@ -1716,13 +1727,15 @@ def test_the_next_decision_is_told_when_an_action_changed_nothing(tmp_path: Path
     # click feedback is a CSS focus wash). Without the observed fact in its history, the agent has
     # re-tried such a click to the step cap, reasoning each time that it must have progressed.
     agent = ScriptedVerificationAgent(actions=[click_action(), click_action(), done_action()], readings=[reading()])
+    rules = _executor_rules(step=_step_result(reaction=StepReaction.NONE))
 
-    _collector, _environment = _run_flow_collector(tmp_path, agent)
+    _collector, _environment = _run_flow_collector(tmp_path, agent, rules)
 
-    # The default scripted step returns the same page every time, so the first click was a silent
-    # no-op and the second decision must be told so. It reaches the history inside the step's own
-    # entry, beside the prediction it is contradicting, rather than as a line of its own.
-    assert any(ui_flows.UNCHANGED_STATE_SUMMARY in entry for entry in agent.histories[1])
+    # The scripted step returns the same page every time and reports that the DOM never moved, so
+    # the first click was a dead control and the second decision must be told so. It reaches the
+    # history inside the step's own entry, beside the prediction it is contradicting, rather than
+    # as a line of its own.
+    assert any(ui_flows.NO_REACTION_SUMMARY in entry for entry in agent.histories[1])
 
 
 def test_a_step_that_changed_the_page_leaves_no_no_change_note(tmp_path: Path) -> None:
@@ -1738,7 +1751,7 @@ def test_a_step_that_changed_the_page_leaves_no_no_change_note(tmp_path: Path) -
 
 
 def test_collector_records_a_flow_that_ran_as_completed_whatever_the_app_showed(tmp_path: Path) -> None:
-    # Trial time records that the declared steps were carried out; whether the app ended up in the
+    # Trial time records that the declared actions were carried out; whether the app ended up in the
     # state the `expect` describes is the grade-time judge's call, from this evidence. Recording a
     # verdict here as well would be a second ruling on the same question, made with less to go on.
     agent = ScriptedVerificationAgent(actions=[done_action()], readings=[reading("the task never appeared")])
@@ -1787,7 +1800,7 @@ def test_collector_keeps_going_when_an_action_does_not_land(tmp_path: Path) -> N
     collector, environment = _run_flow_collector(tmp_path, agent, rules)
 
     entry = _flow_entries(collector)[0]
-    # The flow still carried out its declared steps, so it completed; what the failed action means
+    # The flow still carried out its declared actions, so it completed; what the failed action means
     # for the `expect` is for the judge, which reads the error the log records below.
     assert entry.status is CheckStatus.PASSED
     log = environment.uploaded_content_by_target["/logs/agent/verification/flows/add_complete_delete/log.jsonl"]

@@ -30,6 +30,7 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.logging import log_span
 from imbue.imbue_common.pure import pure
 from imbue.mngr.agents.base_agent import BaseAgent
+from imbue.mngr.agents.base_agent import build_stderr_tee_redirect
 from imbue.mngr.agents.base_agent import quote_agent_args
 from imbue.mngr.agents.common_transcript import maybe_provision_common_transcript_scripts
 from imbue.mngr.agents.common_transcript import provision_raw_transcript_scripts
@@ -547,7 +548,9 @@ class ProvisioningContext(FrozenModel):
     )
 
 
-_ALWAYS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {"hasAcknowledgedCostThreshold": True}
+# Claude Code auto-opens the diff sidebar in wide terminals inside a git repo; a persisted
+# diffSidebarOpen=false is the opt-out, so every agent keeps the transcript at full width.
+_ALWAYS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {"hasAcknowledgedCostThreshold": True, "diffSidebarOpen": False}
 # First-run *dialog* dismissals (cosmetic startup prompts). Dismissed for an unattended agent
 # OR when the human auto-approved mngr's prompts (--yes) -- neither changes tool permissions.
 _DIALOG_DISMISS_CLAUDE_JSON_FLAGS: Final[Mapping[str, bool]] = {
@@ -561,6 +564,10 @@ _UNATTENDED_SETTINGS_FLAGS: Final[Mapping[str, Any]] = {
     "skipDangerousModePermissionPrompt": True,
     # fastMode off by default in unattended mode (API limitation)
     "fastMode": False,
+    # Feedback surveys and drafts prompt a human mid-session, which garbles an
+    # unattended agent's automated input and output.
+    "feedbackSurveyRate": 0,
+    "feedbackDrafts": "off",
 }
 
 
@@ -583,9 +590,10 @@ def compute_claude_json_flags(ctx: ProvisioningContext) -> Mapping[str, bool]:
 def compute_settings_json_flags(ctx: ProvisioningContext) -> Mapping[str, Any]:
     """Compute settings.json flags based on provisioning context.
 
-    These govern tool-permission behavior (skip the dangerous-mode prompt), so they apply only
-    to an unattended agent -- not on a bare --yes, which auto-approves prompts but must not
-    silently change tool permissions.
+    The unattended set skips the dangerous-mode permission prompt, turns off fast mode (an
+    API limitation), and silences the feedback survey and drafts, which only make sense with
+    a human present. It applies only to an unattended agent -- not on a bare --yes, which
+    auto-approves prompts but must not silently change tool permissions.
     """
     if ctx.is_unattended:
         return dict(_UNATTENDED_SETTINGS_FLAGS)
@@ -612,6 +620,11 @@ an mngr agent rather than in the user's persistent ~/.claude/ directory.
 # project's settings.local.json. See ``get_managed_settings_path``.
 _MANAGED_SETTINGS_SHELL_PATH: Final[str] = f"$MNGR_AGENT_STATE_DIR/{'/'.join(MANAGED_SETTINGS_RELATIVE_PATH)}"
 MANAGED_SETTINGS_LAUNCH_ARG: Final[str] = f'--settings "{_MANAGED_SETTINGS_SHELL_PATH}"'
+
+# Where a claude harness's stderr is captured, in the agent's state dir -- shared by
+# the interactive launch below and the headless agent. The bug-report collector picks
+# up any ``*.log`` there, so the name only has to end in ``.log``.
+STDERR_LOG_NAME: Final[str] = "stderr.log"
 
 # Where claude itself looks for output styles, relative to the work_dir. mngr validates
 # `output_style` against this exact path -- the one claude will read -- so a name that
@@ -2948,10 +2961,22 @@ class ClaudeAgent(
         # shell itself, so the branch's own command (claude, or a custom base
         # like a command agent's `sleep infinity`) stays the
         # foreground command, exactly like the pre-chain launch command.
+        # Copy the harness's stderr into the agent's state dir (while keeping it on the
+        # pane): claude runs under tmux rather than supervisord, so a startup error or
+        # crash reaches none of the workspace's service logs and a bug report has no other
+        # way to see it. Claude renders its TUI on stdout, which is untouched.
+        #
+        # The redirect wraps the whole fallback chain rather than each branch, so a branch
+        # that fails does not have its own stderr truncated by the branch that follows it
+        # -- that output is exactly why the fallback happened. An outer brace group (not a
+        # subshell) for the same reason the inner ones are braces: it does not fork, so the
+        # launched claude stays the pane's foreground command.
+        stderr_redirect = build_stderr_tee_redirect(f'"$MNGR_AGENT_STATE_DIR/{STDERR_LOG_NAME}"')
         return CommandString(
             f"{background_cmd} {env_exports}"
             f" && rm -rf $MNGR_AGENT_STATE_DIR/session_started $MNGR_AGENT_STATE_DIR/claude_main_pid"
-            f" && {{ {resume_cmd} ; }} || {{ {resume_uuid_cmd} ; }} || {{ {create_cmd} ; }}"
+            f" && {{ {{ {resume_cmd} ; }} || {{ {resume_uuid_cmd} ; }} || {{ {create_cmd} ; }} ; }}"
+            f" {stderr_redirect}"
         )
 
     def on_before_provisioning(
