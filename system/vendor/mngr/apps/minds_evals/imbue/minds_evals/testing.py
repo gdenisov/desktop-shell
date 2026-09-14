@@ -703,3 +703,18 @@ def worker_trial_downloads(is_document_included: bool = True) -> dict[str, str]:
         BOX_WORKSPACE_TRAJECTORY_PATH: json.dumps(atif_document_with_worker_launch()),
         **captured_worker_downloads(WORKER_AGENT_ID, is_document_included=is_document_included),
     }
+
+
+# A live codex trial's captured document (codex 0.147.0 in code mode), trimmed to the steps that
+# exercise how codex reaches its shell: `tk create --step` declarations, a command built in a template
+# literal inside a loop, a program that failed, a worker launch whose output came back through `wait`,
+# and a later `wait` that failed. Kept as JSON rather than as Python so its programs keep the `await`
+# a real one carries.
+CODEX_CODE_MODE_TRAJECTORY_PATH: Final[Path] = (
+    Path(__file__).parent / "test_fixtures" / "codex_code_mode_trajectory.json"
+)
+
+
+def codex_code_mode_trajectory_document() -> dict[str, Any]:
+    """The trimmed live codex document at CODEX_CODE_MODE_TRAJECTORY_PATH."""
+    return json.loads(CODEX_CODE_MODE_TRAJECTORY_PATH.read_text())
