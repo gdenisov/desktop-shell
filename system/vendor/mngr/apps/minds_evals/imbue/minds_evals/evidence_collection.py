@@ -23,8 +23,6 @@ import tomllib
 from collections.abc import Mapping
 from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
-from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import Final
 from typing import assert_never
@@ -38,6 +36,7 @@ from pydantic import SecretStr
 
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.minds_evals import flow_runner
 from imbue.minds_evals import forward_instance
 from imbue.minds_evals import minds_bridge
 from imbue.minds_evals import ui_flows
@@ -61,6 +60,7 @@ from imbue.minds_evals.data_types import WorkerLaunch
 from imbue.minds_evals.data_types import WorkerListingEntry
 from imbue.minds_evals.data_types import WorkerState
 from imbue.minds_evals.expectations import slugify
+from imbue.minds_evals.resources.flow_step_protocol import StepReaction
 from imbue.minds_evals.trajectory import parse_transcript_jsonl
 from imbue.minds_evals.trajectory import scan_worker_launches
 from imbue.mngr.primitives import AgentLifecycleState
@@ -138,18 +138,10 @@ _BUNDLE_TIMEOUT_SECONDS: Final[int] = 300
 _TEST_COMMAND_TIMEOUT_SECONDS: Final[int] = 300
 _HTTP_TIMEOUT_SECONDS: Final[int] = 60
 _RSYNC_TIMEOUT_SECONDS: Final[int] = 600
-# One flow step: a box-local exec that drives the browser and reads the page back. Generous
-# because a navigation waits for the network to settle and a heavy page's ARIA tree is large.
-_STEP_TIMEOUT_SECONDS: Final[int] = 120
 # How long the forward proxy gets to start serving. It has to bind, then discover the workspace,
 # then bring up its SSH tunnel, and it answers 503 throughout.
 _FORWARD_READY_ATTEMPT_COUNT: Final[int] = 40
 _FORWARD_READY_POLL_SECONDS: Final[float] = 3.0
-# One flow's own wall-clock. Separate from the phase budget on purpose: exceeding this is the app
-# failing to respond, whereas exhausting the phase budget is the harness running out of time.
-# Re-measured against the box-side executor on its first live run rather than carried over from the
-# fleet's ~30s/step, which was dominated by a workspace hop this executor does not make.
-_FLOW_DEADLINE_SECONDS: Final[float] = 600.0
 
 # What a probe prints in a `*_status` section when the file that section reports on was there to
 # read. Anything else -- including the empty section a probe that died mid-command leaves behind --
@@ -161,7 +153,7 @@ _SECTION_MARKER: Final[str] = "<<<MINDS_EVALS_SECTION:{}>>>"
 _SECTION_PATTERN: Final[re.Pattern[str]] = re.compile(r"<<<MINDS_EVALS_SECTION:([a-z_]+)>>>\n?")
 
 # Reasons recorded on non-passing entries, so a manifest reader never has to parse prose.
-REASON_TIMEOUT: Final[str] = "timeout"
+REASON_TIMEOUT: Final[str] = ui_flows.REASON_TIMEOUT
 REASON_BRIDGE_FAILED: Final[str] = "bridge_failed"
 REASON_REPO_NOT_FOUND: Final[str] = "repo_not_found"
 REASON_REGISTRY_ABSENT: Final[str] = "registry_absent"
@@ -272,19 +264,6 @@ async def ensure_evidence_dir(environment: BaseEnvironment) -> None:
     await environment.exec(
         "mkdir -p {}/{}".format(box_verification_dir(), HTTP_DIRNAME), timeout_sec=PROBE_TIMEOUT_SECONDS
     )
-
-
-@pure
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-@pure
-def _bounded(text: str, max_chars: int) -> str:
-    """The tail of a long output, marked so a reader knows it was cut rather than empty."""
-    if len(text) <= max_chars:
-        return text
-    return "[...truncated...]\n" + text[-max_chars:]
 
 
 @pure
@@ -1259,11 +1238,11 @@ class EvidenceCollector(MutableModel):
         )
         self.trace.append(
             TraceRecord(
-                timestamp=utc_now_iso(),
+                timestamp=ui_flows.utc_now_iso(),
                 phase=phase,
                 command=command,
                 is_success=is_success,
-                output=_bounded(output, MAX_TRACE_OUTPUT_CHARS),
+                output=ui_flows.bounded_tail(output, MAX_TRACE_OUTPUT_CHARS),
             )
         )
         return is_success, output
@@ -1287,11 +1266,11 @@ class EvidenceCollector(MutableModel):
         is_success = result.return_code == 0
         self.trace.append(
             TraceRecord(
-                timestamp=utc_now_iso(),
+                timestamp=ui_flows.utc_now_iso(),
                 phase=phase,
                 command=command,
                 is_success=is_success,
-                output=_bounded((result.stdout or "") + (result.stderr or ""), MAX_TRACE_OUTPUT_CHARS),
+                output=ui_flows.bounded_tail((result.stdout or "") + (result.stderr or ""), MAX_TRACE_OUTPUT_CHARS),
             )
         )
         return is_success
@@ -1349,7 +1328,7 @@ class EvidenceCollector(MutableModel):
             ),
             is_expectations_declared=self.case.expectations is not None,
             is_evidence_complete=all(entry.status != CheckStatus.ERROR for entry in self.entries),
-            started_at=self.started_at or utc_now_iso(),
+            started_at=self.started_at or ui_flows.utc_now_iso(),
             phases=tuple(self.phases),
             entries=tuple(self.entries),
         )
@@ -1364,7 +1343,7 @@ class EvidenceCollector(MutableModel):
         expectations-driven steps are skipped on trials that never finished: their structural gates
         already zero the reward, so probing an unfinished build buys nothing.
         """
-        self.started_at = utc_now_iso()
+        self.started_at = ui_flows.utc_now_iso()
         # Idempotent: setup already created this so the declared artifact always exists, but a
         # collector run against a box that skipped setup must not write into a missing directory.
         await ensure_evidence_dir(self.environment)
@@ -1424,7 +1403,7 @@ class EvidenceCollector(MutableModel):
                     CheckClass.APP,
                     CheckStatus.ERROR,
                     _timeout_or(REASON_BRIDGE_FAILED, self._remaining_seconds),
-                    _bounded(output, MAX_COMMAND_OUTPUT_CHARS),
+                    ui_flows.bounded_tail(output, MAX_COMMAND_OUTPUT_CHARS),
                     "",
                 )
             )
@@ -1448,7 +1427,7 @@ class EvidenceCollector(MutableModel):
         sections = split_sections(output)
         # The commands' own stderr is the diagnostic when they ran; the bridge's output when they
         # did not.
-        detail = _bounded(sections.get("stderr", "") if is_success else output, MAX_COMMAND_OUTPUT_CHARS)
+        detail = ui_flows.bounded_tail(sections.get("stderr", "") if is_success else output, MAX_COMMAND_OUTPUT_CHARS)
         stream = await self._bring_out_transcript_file(
             COMMON_TRANSCRIPT_FILENAME, is_success, sections.get("stream_exit", "").strip(), detail
         )
@@ -1535,7 +1514,9 @@ class EvidenceCollector(MutableModel):
         captured by name alone, with no id, state, or lead work dir from the listing."""
         is_success, output = await self._run_in_workspace("workers", worker_listing_command(), _WORKER_TIMEOUT_SECONDS)
         if not is_success:
-            logger.warning("Could not list the workspace's agents: {}", _bounded(output, MAX_COMMAND_OUTPUT_CHARS))
+            logger.warning(
+                "Could not list the workspace's agents: {}", ui_flows.bounded_tail(output, MAX_COMMAND_OUTPUT_CHARS)
+            )
             return ()
         sections = split_sections(output)
         entries = parse_worker_listing(sections.get("listing", ""))
@@ -1543,7 +1524,7 @@ class EvidenceCollector(MutableModel):
             logger.warning(
                 "The workspace's agent listing had no agents in it (exit {}): {}",
                 sections.get("list_exit", "").strip(),
-                _bounded(sections.get("stderr", ""), MAX_COMMAND_OUTPUT_CHARS),
+                ui_flows.bounded_tail(sections.get("stderr", ""), MAX_COMMAND_OUTPUT_CHARS),
             )
         return entries
 
@@ -1559,7 +1540,7 @@ class EvidenceCollector(MutableModel):
             "workers", worker_capture_command(launch.name, lead_work_dir, launch.task_file), _WORKER_TIMEOUT_SECONDS
         )
         sections = split_sections(output)
-        detail = _bounded(sections.get("stderr", "") if is_success else output, MAX_COMMAND_OUTPUT_CHARS)
+        detail = ui_flows.bounded_tail(sections.get("stderr", "") if is_success else output, MAX_COMMAND_OUTPUT_CHARS)
         preserved_dir = sections.get("preserved", "").strip()
         if not is_success:
             return _failed_worker_capture(
@@ -1631,7 +1612,7 @@ class EvidenceCollector(MutableModel):
                 "" if is_pulled else _timeout_or(REASON_BRIDGE_FAILED, self._remaining_seconds),
                 "{} file(s) inventoried".format(output.strip())
                 if is_pulled
-                else _bounded(output, MAX_COMMAND_OUTPUT_CHARS),
+                else ui_flows.bounded_tail(output, MAX_COMMAND_OUTPUT_CHARS),
                 "{}/{}".format(VERIFICATION_DIRNAME, FILE_INVENTORY_FILENAME),
             )
         )
@@ -1675,7 +1656,7 @@ class EvidenceCollector(MutableModel):
                     "head_sha": head_sha,
                     "commit_count_beyond_base": commit_count,
                     "is_clean": not porcelain.strip(),
-                    "status_porcelain": _bounded(porcelain, MAX_COMMAND_OUTPUT_CHARS),
+                    "status_porcelain": ui_flows.bounded_tail(porcelain, MAX_COMMAND_OUTPUT_CHARS),
                 },
                 indent=2,
             ),
@@ -1729,7 +1710,9 @@ class EvidenceCollector(MutableModel):
                     _test_command_status(is_success, exit_code),
                     "" if exit_code == "0" else (REASON_NONZERO_EXIT if is_success else REASON_BRIDGE_FAILED),
                     "$ {}\nexit {}\n{}".format(
-                        command, exit_code or "unknown", _bounded(sections.get("output", ""), MAX_COMMAND_OUTPUT_CHARS)
+                        command,
+                        exit_code or "unknown",
+                        ui_flows.bounded_tail(sections.get("output", ""), MAX_COMMAND_OUTPUT_CHARS),
                     ),
                     "",
                 )
@@ -1812,7 +1795,7 @@ class EvidenceCollector(MutableModel):
                     "status_code": status_code,
                     "elapsed_seconds": elapsed_seconds,
                     "probe_error": probe_error.strip(),
-                    "headers": _bounded(sections.get("headers", ""), MAX_COMMAND_OUTPUT_CHARS),
+                    "headers": ui_flows.bounded_tail(sections.get("headers", ""), MAX_COMMAND_OUTPUT_CHARS),
                     "body_head": body_head,
                 },
                 indent=2,
@@ -1834,14 +1817,14 @@ class EvidenceCollector(MutableModel):
             )
         )
 
-    async def _run_step_script(self, step_request: str) -> ui_flows.StepOutcome:
+    async def run_step_script(self, step_request: str) -> ui_flows.StepOutcome:
         """One flow step: one box exec of the step script, which acts, shoots and reads the page.
 
         Box-local, unlike everything else this collector runs -- the browser and the forward proxy
         both live here, and only the proxy's own tunnel touches the workspace. That is the whole
         latency argument for this executor.
         """
-        wanted_seconds = _STEP_TIMEOUT_SECONDS
+        wanted_seconds = flow_runner.STEP_TIMEOUT_SECONDS
         if self.flow_deadline:
             wanted_seconds = max(1, min(wanted_seconds, int(self.flow_deadline - time.monotonic())))
         result = await minds_bridge.run_in_box(
@@ -1850,11 +1833,11 @@ class EvidenceCollector(MutableModel):
         output = (result.stdout or "") + (result.stderr or "")
         self.trace.append(
             TraceRecord(
-                timestamp=utc_now_iso(),
+                timestamp=ui_flows.utc_now_iso(),
                 phase="ui_flows",
                 command=ui_flows.step_command(step_request)[:400],
                 is_success=result.return_code == 0,
-                output=_bounded(output, MAX_TRACE_OUTPUT_CHARS),
+                output=ui_flows.bounded_tail(output, MAX_TRACE_OUTPUT_CHARS),
             )
         )
         return ui_flows.parse_step_result(result.stdout or "")
@@ -1879,7 +1862,7 @@ class EvidenceCollector(MutableModel):
         await minds_bridge.run_in_box(self.environment, start, self.box_env, self._budget(PROBE_TIMEOUT_SECONDS))
         self.trace.append(
             TraceRecord(
-                timestamp=utc_now_iso(),
+                timestamp=ui_flows.utc_now_iso(),
                 phase="ui_flows",
                 command=forward_instance.redact_forward_command(argv),
                 is_success=True,
@@ -1909,11 +1892,11 @@ class EvidenceCollector(MutableModel):
         )
         self.trace.append(
             TraceRecord(
-                timestamp=utc_now_iso(),
+                timestamp=ui_flows.utc_now_iso(),
                 phase="ui_flows",
                 command=launch,
                 is_success=result.return_code == 0,
-                output=_bounded((result.stdout or "") + (result.stderr or ""), MAX_TRACE_OUTPUT_CHARS),
+                output=ui_flows.bounded_tail((result.stdout or "") + (result.stderr or ""), MAX_TRACE_OUTPUT_CHARS),
             )
         )
         if result.return_code != 0:
@@ -1943,11 +1926,11 @@ class EvidenceCollector(MutableModel):
         if summary:
             self.trace.append(
                 TraceRecord(
-                    timestamp=utc_now_iso(),
+                    timestamp=ui_flows.utc_now_iso(),
                     phase="ui_flows",
                     command="(mngr forward envelopes)",
                     is_success=True,
-                    output=_bounded(summary, MAX_TRACE_OUTPUT_CHARS),
+                    output=ui_flows.bounded_tail(summary, MAX_TRACE_OUTPUT_CHARS),
                 )
             )
 
@@ -2063,210 +2046,52 @@ class EvidenceCollector(MutableModel):
     def _record_flow_error(self, checks: Sequence[UiFlowCheck], reason: str, detail: str) -> None:
         for check in checks:
             self.entries.append(
-                _flow_entry(check, CheckStatus.ERROR, reason, _bounded(detail, MAX_COMMAND_OUTPUT_CHARS))
+                _flow_entry(check, CheckStatus.ERROR, reason, ui_flows.bounded_tail(detail, MAX_COMMAND_OUTPUT_CHARS))
             )
 
     async def _run_one_flow(
         self, check: UiFlowCheck, flow_index: int, target_url: str, agent: ui_flows.VerificationAgent
     ) -> None:
-        """Execute one flow: open the app in a browser of its own, then read-decide-act until the
-        agent says it is done, and finally judge the declared `expect` against the last state."""
+        """Execute one flow in a browser of its own, and record what it produced."""
         slug = slugify(check.name)
-        self.flow_deadline = min(time.monotonic() + _FLOW_DEADLINE_SECONDS, self.deadline)
-        steps: list[str] = []
-        history: list[str] = []
-        is_finished_by_agent = False
+        self.flow_deadline = min(time.monotonic() + flow_runner.FLOW_DEADLINE_SECONDS, self.deadline)
 
         # A browser of its own per flow, so one flow's cookies and storage never leak into the next.
         browser_reason = await self._start_browser(flow_index)
         if browser_reason:
             await self._finish_flow(
-                check, slug, steps, CheckStatus.ERROR, browser_reason, "the box browser never came up"
+                check, slug, (), CheckStatus.ERROR, browser_reason, "the box browser never came up"
             )
             return
-        endpoint = ui_flows.cdp_endpoint(ui_flows.flow_browser_port(flow_index))
-
-        # The session cookie rides this first request, so the opening navigation is already
-        # authenticated (`forward_instance.session_cookie_domain` for the scope it carries).
-        opening = ui_flows.FlowAction(
-            kind=ui_flows.FlowActionKind.OPEN,
-            role="",
-            target="",
-            text=target_url,
-            amount=0,
-            reasoning="the flow has not opened the app yet",
-            expected="the delivered app loads",
+        executor = _BoxFlowStepExecutor(
+            collector=self,
+            slug=slug,
+            cdp_endpoint_url=ui_flows.cdp_endpoint(ui_flows.flow_browser_port(flow_index)),
         )
-        outcome = await self._run_step_script(
-            ui_flows.build_step_request(
-                opening,
-                self._flow_screenshot_path(slug, 0),
-                cdp_endpoint_url=endpoint,
-                preauth_cookie=self.preauth_cookie.get_secret_value(),
-                cookie_domain=forward_instance.session_cookie_domain(self.workspace_agent_id),
-            )
+        run = await flow_runner.run_flow(
+            check, target_url, agent, executor, phase_deadline=self.deadline, flow_deadline=self.flow_deadline
         )
-        if not outcome.is_ok:
-            # The harness's own navigation to the delivered app's forwarded origin. If THIS fails on
-            # the instrument, it cannot look at the app at all; if it fails on the app -- a page that
-            # never loads -- that is the deliverable falling short.
-            # A step that failed always names its layer; a report that names none is the executor
-            # failing to say what happened, which is an instrument failure like any other. The
-            # status follows the reason, so the two can never disagree.
-            reason = outcome.reason or ui_flows.REASON_STEP_ERROR
-            await self._finish_flow(
-                check,
-                slug,
-                steps,
-                CheckStatus.ERROR if ui_flows.is_instrument_reason(reason) else CheckStatus.FAILED,
-                reason,
-                outcome.detail,
-            )
-            return
-        state_text = outcome.state_text
-        steps.append(
-            ui_flows.flow_init_record(
-                check.steps, check.expect, target_url, state_text, outcome.screenshot_name, utc_now_iso()
-            )
-        )
+        await self._finish_flow(check, slug, run.records, run.status, run.reason, run.detail)
 
-        for step_index in range(1, ui_flows.MAX_STEPS_PER_FLOW + 1):
-            if self._remaining_seconds <= 0:
-                await self._finish_flow(
-                    check, slug, steps, CheckStatus.ERROR, REASON_TIMEOUT, "the collection budget ran out mid-flow"
-                )
-                return
-            if time.monotonic() >= self.flow_deadline:
-                # The flow's own deadline, unlike the phase budget, is about THIS app: a page that
-                # never settles is the delivered thing being unusable.
-                await self._finish_flow(
-                    check,
-                    slug,
-                    steps,
-                    CheckStatus.FAILED,
-                    ui_flows.REASON_FLOW_DEADLINE,
-                    "the flow did not finish within its deadline",
-                )
-                return
-            action, _call = agent.decide_next_action(check.steps, tuple(history), state_text)
-            if action is None:
-                await self._finish_flow(
-                    check,
-                    slug,
-                    steps,
-                    CheckStatus.ERROR,
-                    ui_flows.REASON_VERIFIER_AGENT_FAILED,
-                    "the verification agent returned no usable action",
-                )
-                return
-            described = ui_flows.describe_action(action)
-            if action.kind == ui_flows.FlowActionKind.DONE:
-                steps.append(
-                    ui_flows.flow_step_record(
-                        step_index,
-                        described,
-                        action.reasoning,
-                        action.expected,
-                        "",
-                        state_text,
-                        "",
-                        "",
-                        utc_now_iso(),
-                    )
-                )
-                is_finished_by_agent = True
-                break
-            outcome = await self._run_step_script(
-                ui_flows.build_step_request(
-                    action,
-                    self._flow_screenshot_path(slug, step_index),
-                    cdp_endpoint_url=endpoint,
-                    preauth_cookie="",
-                    cookie_domain="",
-                )
-            )
-            if ui_flows.is_instrument_reason(outcome.reason):
-                steps.append(
-                    ui_flows.flow_step_record(
-                        step_index,
-                        described,
-                        action.reasoning,
-                        action.expected,
-                        "",
-                        state_text,
-                        "",
-                        outcome.reason,
-                        utc_now_iso(),
-                    )
-                )
-                await self._finish_flow(check, slug, steps, CheckStatus.ERROR, outcome.reason, outcome.detail)
-                return
-            step_error = ""
-            if not outcome.is_ok:
-                # The action did not land but the browser is fine -- an element that is not there,
-                # a click that hit nothing. The page below shows the truth, so the flow carries on
-                # with the failure recorded where the grade-time judge will read it.
-                step_error = _bounded(outcome.detail.strip(), 200)
-            # What the page did, against what the action predicted it would do. Recorded on the step
-            # and carried into the next decision's history, which is where a wrong model of the UI
-            # -- a filter that turns out to be a toggle -- becomes visible instead of being retried.
-            observed = ui_flows.summarize_state_change(state_text, outcome.state_text or state_text)
-            history.append(ui_flows.describe_step(described, action.expected, step_error, observed))
-            steps.append(
-                ui_flows.flow_step_record(
-                    step_index,
-                    described,
-                    action.reasoning,
-                    action.expected,
-                    observed,
-                    state_text,
-                    # The executor names the frame it actually wrote, and names nothing when the
-                    # capture failed. Naming the file it would have written instead would put a
-                    # screenshot that does not exist in front of the grade-time judge.
-                    outcome.screenshot_name,
-                    step_error,
-                    utc_now_iso(),
-                )
-            )
-            state_text = outcome.state_text or state_text
-
-        # The agent's account of the state the flow ended in. Evidence for the judge, never a
-        # verdict on the `expect` -- and a call that produced nothing costs the flow its context,
-        # not its completion, because the step log already carries every state that was seen.
-        reading, _reading_call = agent.read_final_state(check.steps, tuple(history), state_text)
-        observation = reading.observation if reading is not None else ""
-        steps.append(ui_flows.flow_final_record(len(steps), observation, state_text, utc_now_iso()))
-        # Completion, not achievement: a flow that carried out its declared steps is `completed`,
-        # and one that ran out of budget first is `incomplete`. Whether the app did what the
-        # `expect` describes is decided at grade time, from this evidence.
-        await self._finish_flow(
-            check,
-            slug,
-            steps,
-            CheckStatus.PASSED if is_finished_by_agent else CheckStatus.FAILED,
-            "" if is_finished_by_agent else ui_flows.REASON_STEP_BUDGET_EXHAUSTED,
-            "expected: {}\nagent's reading of the final state: {}".format(
-                check.expect, observation or "(none recorded)"
-            ),
-        )
-
-    def _flow_screenshot_path(self, slug: str, step_index: int) -> str:
+    def flow_screenshot_path(self, slug: str, step_index: int) -> str:
         """Where the step script writes a frame: straight into the box's evidence directory.
 
         The browser runs in the box, so the screenshot is already where the declared artifact
         collector will find it -- there is no workspace staging leg and no rsync at all, which is
         the transport the fleet executor needed and this one does not.
         """
-        return "{}/{}/{}/step_{:03d}.png".format(self._box_dir, FLOWS_DIRNAME, slug, step_index)
+        return "{}/{}/{}/{}".format(self._box_dir, FLOWS_DIRNAME, slug, ui_flows.flow_screenshot_name(step_index))
 
     async def _finish_flow(
-        self, check: UiFlowCheck, slug: str, steps: Sequence[str], status: CheckStatus, reason: str, detail: str
+        self, check: UiFlowCheck, slug: str, records: Sequence[str], status: CheckStatus, reason: str, detail: str
     ) -> None:
         """Write one flow's step log and record its entry. Screenshots are already in place."""
         await self._write_evidence(
-            "{}/{}/{}".format(FLOWS_DIRNAME, slug, FLOW_LOG_FILENAME), "".join(line + "\n" for line in steps)
+            "{}/{}/{}".format(FLOWS_DIRNAME, slug, FLOW_LOG_FILENAME), "".join(line + "\n" for line in records)
         )
-        self.entries.append(_flow_entry(check, status, reason, _bounded(detail, MAX_COMMAND_OUTPUT_CHARS)))
+        self.entries.append(
+            _flow_entry(check, status, reason, ui_flows.bounded_tail(detail, MAX_COMMAND_OUTPUT_CHARS))
+        )
         await self._flush_record()
 
     def _evaluate_app_checks(self, expectations: ExpandedExpectations) -> None:
@@ -2296,6 +2121,34 @@ class EvidenceCollector(MutableModel):
                     )
                 )
         self._record_phase("app_checks", started_at)
+
+
+class _BoxFlowStepExecutor(flow_runner.FlowStepExecutor):
+    """The trial-time executor: each step is one exec of the step script in the box, against the
+    browser the collector launched for this flow, writing its frame into the box's evidence dir.
+
+    The session cookie rides the OPENING request only, so the flow's first navigation is already
+    authenticated; later steps land in the same browser, which is still holding the session. The
+    scope it is installed at is `forward_instance.session_cookie_domain`.
+    """
+
+    collector: EvidenceCollector = Field(frozen=True, description="Owns the bridge, the budget and the trace")
+    slug: str = Field(frozen=True, description="The flow's evidence directory name under flows/")
+    cdp_endpoint_url: str = Field(frozen=True, description="Where this flow's box browser listens for CDP")
+
+    async def run_step(self, action: ui_flows.FlowAction, step_index: int) -> ui_flows.StepOutcome:
+        is_opening = step_index == 0
+        return await self.collector.run_step_script(
+            ui_flows.build_step_request(
+                action,
+                self.collector.flow_screenshot_path(self.slug, step_index),
+                cdp_endpoint_url=self.cdp_endpoint_url,
+                preauth_cookie=self.collector.preauth_cookie.get_secret_value() if is_opening else "",
+                cookie_domain=(
+                    forward_instance.session_cookie_domain(self.collector.workspace_agent_id) if is_opening else ""
+                ),
+            )
+        )
 
 
 @pure
@@ -2391,7 +2244,7 @@ def _oracle_flow_log(check: UiFlowCheck) -> str:
         line + "\n"
         for line in (
             ui_flows.flow_init_record(
-                check.steps,
+                check.actions,
                 check.expect,
                 _ORACLE_APP_URL,
                 opening_state,
@@ -2401,9 +2254,10 @@ def _oracle_flow_log(check: UiFlowCheck) -> str:
             ui_flows.flow_step_record(
                 1,
                 "finish the flow",
-                "the delivered app, open and showing what the steps describe",
-                "nothing further -- every declared step has been carried out",
+                "the delivered app, open and showing what the declared actions describe",
+                "nothing further -- every declared action has been carried out",
                 "",
+                StepReaction.UNOBSERVED,
                 "{}\n{}".format(opening_state, check.expect),
                 "",
                 "",

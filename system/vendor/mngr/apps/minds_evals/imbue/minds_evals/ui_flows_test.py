@@ -7,6 +7,7 @@ import pytest
 from imbue.minds_evals import forward_instance
 from imbue.minds_evals import minds_bridge
 from imbue.minds_evals import ui_flows
+from imbue.minds_evals.resources.flow_step_protocol import StepReaction
 from imbue.minds_evals.testing import FAKE_WORKSPACE_AGENT_ID
 
 
@@ -318,7 +319,16 @@ def test_flow_step_record_keeps_the_page_state_verbatim() -> None:
 
     record = json.loads(
         ui_flows.flow_step_record(
-            0, "click the button", "a delete button", "the row goes", "", state, "step_000.png", "", "t"
+            0,
+            "click the button",
+            "a delete button",
+            "the row goes",
+            "",
+            StepReaction.SETTLED,
+            state,
+            "step_000.png",
+            "",
+            "t",
         )
     )
 
@@ -336,6 +346,7 @@ def test_flow_step_record_says_when_the_action_never_ran() -> None:
             "a delete button",
             "the row goes",
             "",
+            StepReaction.UNOBSERVED,
             "- heading",
             "s.png",
             "no such",
@@ -350,7 +361,11 @@ def test_every_record_kind_names_itself() -> None:
     # A reader dispatches on the kind rather than inferring from which fields are present, so a
     # record that named none would be read as whatever the reader's fallback happens to be.
     init = json.loads(ui_flows.flow_init_record("open it", "it opens", "https://x/", "- heading", "s.png", "t"))
-    action = json.loads(ui_flows.flow_step_record(1, "click", "a button", "a row goes", "", "- heading", "", "", "t"))
+    action = json.loads(
+        ui_flows.flow_step_record(
+            1, "click", "a button", "a row goes", "", StepReaction.SETTLED, "- heading", "", "", "t"
+        )
+    )
     final = json.loads(ui_flows.flow_final_record(2, "the row is gone", "- heading", "t"))
 
     assert (init["kind"], action["kind"], final["kind"]) == ("init", "action", "final")
@@ -376,6 +391,7 @@ def test_an_action_records_what_it_predicted_and_what_followed() -> None:
             "a team button",
             "the list narrows",
             "- button [pressed]",
+            StepReaction.SETTLED,
             "- x",
             "",
             "",
@@ -385,6 +401,9 @@ def test_an_action_records_what_it_predicted_and_what_followed() -> None:
 
     assert (record["reasoning"], record["expected"]) == ("a team button", "the list narrows")
     assert record["observed"] == "- button [pressed]"
+    # The executor's raw word travels beside the prose, so a tally of unanswered actions can count
+    # it rather than parse sentences.
+    assert record["reaction"] == "settled"
 
 
 def test_an_unchanged_page_is_said_in_so_many_words() -> None:
@@ -535,3 +554,91 @@ def test_a_real_change_survives_the_normalising() -> None:
     after = '- textbox "Add a task" [active] [ref=e9]\n- text: buy milk'
 
     assert ui_flows.summarize_state_change(before, after) == "new: - text: buy milk"
+
+
+# --- what a step's effect says, given what the executor saw the DOM do ---
+
+
+@pytest.mark.parametrize(
+    ("reaction", "expected_summary"),
+    [
+        (StepReaction.UNOBSERVED, ui_flows.UNCHANGED_STATE_SUMMARY),
+        (StepReaction.NONE, ui_flows.NO_REACTION_SUMMARY),
+        (StepReaction.SETTLED, ui_flows.ACKNOWLEDGED_ONLY_SUMMARY),
+        (StepReaction.STILL_CHANGING, ui_flows.STILL_CHANGING_UNCHANGED_SUMMARY),
+    ],
+)
+def test_an_unchanged_tree_is_qualified_by_what_the_dom_did(reaction: StepReaction, expected_summary: str) -> None:
+    # A dead control and a control that answered with nothing but a highlight look identical in
+    # the tree, and call for opposite next moves; only the executor's word on the DOM tells them
+    # apart. Each sentence is distinct, so the agent cannot mistake one for another.
+    state = '- button "Delete" [ref=e15]'
+
+    assert ui_flows.summarize_step_effect(state, state, reaction) == expected_summary
+
+
+def test_a_tree_that_moved_speaks_for_itself() -> None:
+    before = "- heading"
+    after = "- heading\n- text: buy milk"
+
+    assert ui_flows.summarize_step_effect(before, after, StepReaction.SETTLED) == "new: - text: buy milk"
+    assert ui_flows.summarize_step_effect(before, after, StepReaction.NONE) == "new: - text: buy milk"
+
+
+def test_a_tree_read_while_the_page_was_still_moving_says_so() -> None:
+    # The agent is about to act on this state, and it may not be the state the page ends up in.
+    before = "- heading"
+    after = "- heading\n- text: 250 ms"
+
+    summary = ui_flows.summarize_step_effect(before, after, StepReaction.STILL_CHANGING)
+
+    assert summary == "{} new: - text: 250 ms".format(ui_flows.STILL_CHANGING_PREFIX)
+
+
+def test_the_four_unchanged_sentences_are_told_apart_by_their_first_words() -> None:
+    # The history is what the agent reads them from, and its rules key on how each one begins.
+    sentences = [
+        ui_flows.UNCHANGED_STATE_SUMMARY,
+        ui_flows.NO_REACTION_SUMMARY,
+        ui_flows.ACKNOWLEDGED_ONLY_SUMMARY,
+        ui_flows.STILL_CHANGING_UNCHANGED_SUMMARY,
+    ]
+
+    assert len({sentence.split(":")[0] for sentence in sentences}) == len(sentences)
+    assert ui_flows.NO_REACTION_SUMMARY.startswith("nothing happened")
+    assert ui_flows.ACKNOWLEDGED_ONLY_SUMMARY.startswith("the page reacted but shows nothing new")
+
+
+def test_the_prompt_exempts_a_scroll_from_the_rule_against_repeating_an_action() -> None:
+    # A scroll's own effect is the viewport, which neither the DOM watch nor the accessible tree
+    # shows, so every scroll on a page without lazy loading reports "nothing happened". Without the
+    # exemption the rule above it would leave the agent one scroll per flow, and no way down a page.
+    assert "'scroll' is the exception" in ui_flows._SYSTEM_PROMPT
+    assert "Repeat it to reach further down the page" in ui_flows._SYSTEM_PROMPT
+
+
+def test_wait_is_an_action_the_agent_can_choose_and_a_reader_can_name() -> None:
+    action = ui_flows.parse_action({"action": "wait", "reasoning": "the page says saving", "expected": "it finishes"})
+
+    assert action is not None and action.kind is ui_flows.FlowActionKind.WAIT
+    assert ui_flows.describe_action(action) == "wait for the page to change"
+    assert (
+        json.loads(ui_flows.build_step_request(action, "", "http://127.0.0.1:1", "", ""))["action"]["kind"] == "wait"
+    )
+
+
+def test_the_prompt_tells_the_agent_when_to_wait_and_when_a_reload_counts_against_the_app() -> None:
+    assert "choose 'wait'" in ui_flows._SYSTEM_PROMPT
+    assert "Choose 'reload' only where the declared actions say to reload" in ui_flows._SYSTEM_PROMPT
+    assert "wait: " in str(ui_flows._ACTION_TOOL["input_schema"])
+
+
+def test_parse_step_result_carries_the_executors_word_on_the_dom() -> None:
+    outcome = ui_flows.parse_step_result(
+        json.dumps({"is_ok": True, "url": "https://x/", "title": "T", "snapshot": "- heading", "reaction": "none"})
+    )
+
+    assert outcome.reaction is StepReaction.NONE
+    # A reply from a step that never watched carries the default rather than failing to parse.
+    unwatched = ui_flows.parse_step_result(json.dumps({"is_ok": True, "url": "https://x/", "snapshot": "- h"}))
+    assert unwatched.reaction is StepReaction.UNOBSERVED

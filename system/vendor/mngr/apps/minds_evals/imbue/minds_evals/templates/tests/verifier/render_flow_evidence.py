@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 VERIFICATION_DIR = Path("/logs/agent/verification")
-# The case as the generator expanded it, which is where a flow's declared steps and its `expect`
+# The case as the generator expanded it, which is where a flow's declared actions and its `expect`
 # live. Same path outcome/checks.py reads: harbor mounts the task's tests directory there.
 CASE_PATH = Path("/tests/case.json")
 DIGEST_PATH = Path("/logs/agent/judge_flows_digest.txt")
@@ -73,8 +73,19 @@ def _load_json(path: Path) -> dict[str, Any]:
 
 
 # How a manifest status reads in the digest. Trial time records whether a flow ran to the end of its
-# declared steps; it does not rule on the `expect`, so the words here must not suggest it did.
+# declared actions; it does not rule on the `expect`, so the words here must not suggest it did.
 _COMPLETION_BY_STATUS = {"passed": "completed", "failed": "incomplete", "error": "not measured"}
+
+# The agent driving a flow may reload only where the declared actions say so; it waits out a
+# pending state instead. A reload it took anyway is its last resort for an app that had stopped
+# responding, and the judge -- which reads the declared actions and can see which reloads they
+# called for -- is told to read it that way.
+_RELOAD_NOTE = (
+    "Note on reloads: the agent driving a flow reloads the page only where the declared actions say "
+    "to. A 'reload the page' step that the declared actions did not call for is the agent's last "
+    "resort after the app stopped responding to it, and is evidence against the app: an app that "
+    "needs a full reload to show its own state has already failed to work."
+)
 
 
 def _declared_flows(case_path: Path) -> dict[str, dict[str, Any]]:
@@ -92,6 +103,17 @@ def _declared_flows(case_path: Path) -> dict[str, dict[str, Any]]:
         for check in checks
         if isinstance(check, dict) and check.get("check_id")
     }
+
+
+def _declared_actions(check: dict[str, Any]) -> str:
+    """What the flow declares it does. Read as `actions`, with `steps` as the name a dataset
+    generated before the rename carries; a regrade of such a trial still has to show the judge the
+    flow it ran.
+
+    CLEANUP: drop the `steps` fallback once no trial generated before 2026-09-11 is regraded any
+    more (after the next minds release ships with the rename).
+    """
+    return str(check.get("actions") or check.get("steps") or "")
 
 
 def _flow_entries(verification_dir: Path) -> list[dict[str, Any]]:
@@ -216,7 +238,7 @@ def _flow_header(entry: dict[str, Any], check: dict[str, Any], steps: list[dict[
         "",
     )
     return [
-        "declared steps: {}".format(check.get("steps") or "(not recorded)"),
+        "declared actions: {}".format(_declared_actions(check) or "(not recorded)"),
         "expect (YOU decide whether this holds): {}".format(check.get("expect") or "(not recorded)"),
         "completion: {} ({})".format(
             _COMPLETION_BY_STATUS.get(str(entry.get("status") or ""), "unknown"), entry.get("reason") or "-"
@@ -304,7 +326,7 @@ def render_digest(
             "{} of {} selected screenshot(s) are attached to this judge request; the earliest flows' "
             "frames were dropped to stay within the attachment ceiling.".format(attached_count, chosen_count)
         )
-    index_lines += ["", attachment_line, ""]
+    index_lines += ["", attachment_line, "", _RELOAD_NOTE, ""]
 
     index = "\n".join(index_lines) + "\n"
     # The index is always kept whole: it is what tells the judge how many flows there were and how
