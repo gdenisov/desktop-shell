@@ -19,6 +19,7 @@ from imbue.minds_evals.testing import WORKER_TASK_FILE
 from imbue.minds_evals.testing import atif_document
 from imbue.minds_evals.testing import atif_document_json
 from imbue.minds_evals.testing import atif_document_with_worker_launch
+from imbue.minds_evals.testing import codex_code_mode_trajectory_document
 from imbue.minds_evals.testing import worker_document
 from imbue.minds_evals.testing import worker_launch
 from imbue.minds_evals.testing import worker_stream_jsonl
@@ -294,6 +295,45 @@ def test_scan_worker_launches_reads_the_launch_as_the_skill_spells_it() -> None:
     ]
 
 
+def test_scan_worker_launches_reads_a_codex_code_mode_program() -> None:
+    # codex runs its shell from inside a JavaScript program carried whole under `_raw`, and one
+    # program can batch several calls, so every shell call in it has to be read: a launch behind an
+    # unrelated call, or behind another launch, is a worker whose transcript is otherwise never
+    # collected. Both launches take the program's own call id, which is what the embedding attaches
+    # them by.
+    program = (
+        'tools.view_image({{path: "/home/user/workspace/shot.png"}});\n'
+        'const a = tools.shell_command({{"command":{},"workdir":"/home/user/workspace"}});\n'
+        'const b = tools.exec_command({{cmd:{},workdir:"/home/user/workspace"}});\n'
+    )
+    steps = [
+        {
+            "step_id": 1,
+            "source": "agent",
+            "message": "",
+            "tool_calls": [
+                {
+                    "tool_call_id": "c1",
+                    "function_name": "exec",
+                    "arguments": {
+                        "_raw": program.format(
+                            json.dumps(WORKER_LAUNCH_COMMAND),
+                            json.dumps("uv run create_worker.py launch --name second --task-file s.md"),
+                        )
+                    },
+                }
+            ],
+        }
+    ]
+
+    launches = scan_worker_launches(steps, depth=0, lead_name="")
+
+    assert [(launch.name, launch.tool_call_id, launch.task_file) for launch in launches] == [
+        (WORKER_NAME, "c1", WORKER_TASK_FILE),
+        ("second", "c1", "s.md"),
+    ]
+
+
 def test_graft_embeds_the_worker_under_its_launching_call() -> None:
     document = atif_document_with_worker_launch()
     worker = EmbeddedWorker(
@@ -553,3 +593,21 @@ def test_workspace_boundary_that_resolves_to_nothing_is_dropped() -> None:
     ).to_json_dict()
 
     assert [step["source"] for step in built["steps"]] == ["user", "agent"]
+
+
+def test_scan_worker_launches_finds_the_worker_a_live_codex_trial_launched() -> None:
+    # A captured codex trial launched a worker from inside a code-mode program. The launch takes that
+    # program's call id, which is what the embedding attaches the worker's transcript by.
+    steps = codex_code_mode_trajectory_document()["steps"]
+    launching_call_id = next(
+        call["tool_call_id"]
+        for step in steps
+        for call in step.get("tool_calls") or []
+        if "create_worker.py launch" in call["arguments"].get("_raw", "")
+    )
+
+    launches = scan_worker_launches(steps, depth=0, lead_name="")
+
+    assert [(launch.name, launch.tool_call_id, launch.task_file) for launch in launches] == [
+        ("crystallize-todo-list", launching_call_id, "data/.tasks/harden/crystallize-todo-list/task.md")
+    ]
