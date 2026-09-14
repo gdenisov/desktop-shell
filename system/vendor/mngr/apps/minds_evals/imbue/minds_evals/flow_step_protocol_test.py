@@ -12,6 +12,7 @@ from imbue.minds_evals.resources.flow_step_protocol import REASON_UNKNOWN_ACTION
 from imbue.minds_evals.resources.flow_step_protocol import StepAction
 from imbue.minds_evals.resources.flow_step_protocol import StepActionKind
 from imbue.minds_evals.resources.flow_step_protocol import StepCookie
+from imbue.minds_evals.resources.flow_step_protocol import StepReaction
 from imbue.minds_evals.resources.flow_step_protocol import StepRequest
 from imbue.minds_evals.resources.flow_step_protocol import StepResult
 from imbue.minds_evals.resources.flow_step_protocol import request_error_reason
@@ -92,3 +93,27 @@ def test_a_result_carries_the_page_even_when_the_step_failed() -> None:
     assert "Things to do" in result.snapshot
     # A capture that never happened says so rather than naming a frame nobody wrote.
     assert result.screenshot_path == ""
+    # An action that failed never got as far as watching the page, and says so.
+    assert result.reaction is StepReaction.UNOBSERVED
+
+
+def test_a_wait_travels_as_its_own_kind_and_needs_no_target() -> None:
+    restored = StepRequest.model_validate_json(
+        StepRequest(
+            cdp_endpoint="http://127.0.0.1:9333",
+            screenshot_path="/logs/agent/verification/flows/f/step_002.png",
+            action=StepAction(kind=StepActionKind.WAIT),
+        ).model_dump_json()
+    )
+
+    assert restored.action.kind is StepActionKind.WAIT
+    assert (restored.action.role, restored.action.target) == ("", "")
+
+
+def test_a_reaction_the_driver_does_not_know_fails_at_the_boundary() -> None:
+    # The step script and the driver share the vocabulary; a word outside it is the two having
+    # drifted apart, which must not be read as any particular thing the page did.
+    with pytest.raises(ValidationError) as caught:
+        StepResult.model_validate_json('{"is_ok": true, "reaction": "exploded"}')
+
+    assert tuple(caught.value.errors()[0]["loc"]) == ("reaction",)

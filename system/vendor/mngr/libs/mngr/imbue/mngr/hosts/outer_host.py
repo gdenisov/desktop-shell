@@ -161,6 +161,22 @@ def _list_directory_local(path: Path, recursive: bool) -> list[VolumeFile]:
     return entries
 
 
+def _is_remote_directory(sftp: SFTPClient, path: str) -> bool:
+    """Whether ``path`` is a directory, asked of the server rather than inferred.
+
+    An SFTP server refuses to open a directory for reading with an opaque
+    failure whose message is server-specific, so the only portable way to tell
+    that case apart from a genuine read error is to ask what the path is. A
+    stat that itself fails answers False, leaving the original error to stand.
+    """
+    try:
+        attrs = sftp.stat(path)
+    except IOError as e:
+        logger.trace("stat failed while classifying {}: {}", path, e)
+        return False
+    return attrs.st_mode is not None and stat.S_ISDIR(attrs.st_mode)
+
+
 def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeFile]:
     """List a remote directory via SFTP ``listdir_attr``, optionally recursing.
 
@@ -939,6 +955,15 @@ class OuterHost(OuterHostInterface):
             error_msg = str(e)
             if "No such file" in error_msg or "not found" in error_msg.lower():
                 raise FileNotFoundError(f"File not found: {remote_filename}") from e
+            # Reading a directory fails here with a server-specific message, so
+            # classify it by asking the server; this keeps a remote read's error
+            # the same OSError subclass a local read of a directory raises. Only
+            # a failure the server actually answered is worth asking about: a
+            # timed-out or dead connection cannot answer, and must not be made
+            # slower by the attempt.
+            is_answered_by_server = not isinstance(e, TimeoutError) and not is_dead_ssh_connection_error(e)
+            if is_answered_by_server and _is_remote_directory(sftp, remote_filename):
+                raise IsADirectoryError(f"Is a directory: {remote_filename}") from e
             raise
         finally:
             sftp.close()
@@ -1253,33 +1278,58 @@ class OuterHost(OuterHostInterface):
             return output.getvalue()
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
-        """Write bytes content to a file, creating parent directories as needed."""
+        """Write bytes content to a file, creating parent directories as needed.
+
+        ``mode`` is an octal string (e.g. ``"0755"``) applied to the final path. With
+        ``is_atomic`` the bytes land in a sibling temp file that is renamed over ``path``
+        once complete, so a reader never sees a half-written file; the mode is applied
+        after that rename either way.
+        """
         if is_atomic:
             write_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
         else:
             write_path = path
 
         if self.is_local:
-            try:
-                write_path.write_bytes(content)
-            except FileNotFoundError:
-                write_path.parent.mkdir(parents=True, exist_ok=True)
-                write_path.write_bytes(content)
+            self._write_file_local(path, write_path, content, mode)
         else:
-            try:
-                is_success = self._put_file(io.BytesIO(content), str(write_path))
-            except IOError:
-                is_success = False
+            self._write_file_remote(path, write_path, content, mode)
+
+    def _write_file_local(self, path: Path, write_path: Path, content: bytes, mode: str | None) -> None:
+        """Write, rename, and chmod straight through the local filesystem.
+
+        Every step the remote path delegates to a shell command is a direct filesystem
+        call here. Spawning a shell to chmod a file this process just wrote costs more
+        than the write did, and that latency is what stretches under a loaded machine.
+        """
+        try:
+            write_path.write_bytes(content)
+        except FileNotFoundError:
+            write_path.parent.mkdir(parents=True, exist_ok=True)
+            write_path.write_bytes(content)
+        if write_path != path:
+            # The temp file is a sibling of its destination, so this is a same-filesystem
+            # rename: atomic, and it replaces any existing file.
+            os.replace(write_path, path)
+        if mode is not None:
+            path.chmod(int(mode, 8))
+
+    def _write_file_remote(self, path: Path, write_path: Path, content: bytes, mode: str | None) -> None:
+        """Write, rename, and chmod over the connection, via SFTP plus shell commands."""
+        try:
+            is_success = self._put_file(io.BytesIO(content), str(write_path))
+        except IOError:
+            is_success = False
+        if not is_success:
+            parent_dir = str(write_path.parent)
+            result = self.execute_idempotent_command(f"mkdir -p '{parent_dir}'")
+            if not result.success:
+                raise MngrError(
+                    f"Failed to create parent directory '{parent_dir}' on outer host {self.id} because: {result.stderr}"
+                )
+            is_success = self._put_file(io.BytesIO(content), str(write_path))
             if not is_success:
-                parent_dir = str(write_path.parent)
-                result = self.execute_idempotent_command(f"mkdir -p '{parent_dir}'")
-                if not result.success:
-                    raise MngrError(
-                        f"Failed to create parent directory '{parent_dir}' on outer host {self.id} because: {result.stderr}"
-                    )
-                is_success = self._put_file(io.BytesIO(content), str(write_path))
-                if not is_success:
-                    raise MngrError(f"Failed to write file '{str(write_path)}' on outer host {self.id}'")
+                raise MngrError(f"Failed to write file '{str(write_path)}' on outer host {self.id}'")
         if write_path != path:
             result = self.execute_idempotent_command(f"mv '{str(write_path)}' '{str(path)}'")
             if not result.success:

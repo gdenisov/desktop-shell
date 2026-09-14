@@ -3,9 +3,10 @@
 A declared flow is natural language ("Add a task named 'buy milk'. Reload the page."), and the app
 it runs against was invented by the agent under test, so there are no selectors to script. This
 module is the decider's sibling: it renders the flow plus what the browser currently sees into a
-prompt, asks a model for the single next browser action, and -- once the steps are done -- asks it
-whether the flow's `expect` holds. Everything it returns is data; the loop that executes actions and
-writes evidence lives in the evidence collector, exactly as the decider's loop lives in the driver.
+prompt, asks a model for the single next browser action, and -- once the declared actions are done -- asks it
+what the final page shows. Everything it returns is data; the loop that executes actions and records
+each step is `flow_runner.run_flow`, which the evidence collector drives at trial time and the flow
+lab drives locally, exactly as the decider's loop lives in the driver.
 
 Reasoning stays host-side on purpose: a loop delegated to the browser would return a bare claim
 rather than a stepwise record, and could be neither bounded nor observed. Here every step is
@@ -25,6 +26,8 @@ from abc import ABC
 from abc import abstractmethod
 from collections import Counter
 from collections.abc import Sequence
+from datetime import datetime
+from datetime import timezone
 from enum import auto
 from typing import Any
 from typing import Final
@@ -39,6 +42,7 @@ from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
+from imbue.minds_evals import flow_browser
 from imbue.minds_evals import minds_bridge
 from imbue.minds_evals import model_calls
 from imbue.minds_evals.forward_instance import SESSION_COOKIE_NAME
@@ -46,6 +50,7 @@ from imbue.minds_evals.resources import flow_step_protocol
 from imbue.minds_evals.resources.flow_step_protocol import StepAction
 from imbue.minds_evals.resources.flow_step_protocol import StepActionKind
 from imbue.minds_evals.resources.flow_step_protocol import StepCookie
+from imbue.minds_evals.resources.flow_step_protocol import StepReaction
 from imbue.minds_evals.resources.flow_step_protocol import StepRequest
 from imbue.minds_evals.resources.flow_step_protocol import StepResult
 
@@ -108,7 +113,11 @@ class FlowActionKind(LowerCaseStrEnum):
     # Its own action rather than a re-`open`: a reload keeps the URL and the session, which is
     # exactly what a persistence flow is testing, whereas navigating afresh would not.
     RELOAD = auto()
-    # The declared steps are complete, or the agent cannot make further progress; either way the
+    # Perform nothing and give the page time to change. How a flow sits out a pending state -- a
+    # spinner, a "saving" notice -- without a reload, which would throw away the very state a
+    # working app is expected to resolve on its own.
+    WAIT = auto()
+    # The declared actions are complete, or the agent cannot make further progress; either way the
     # `expect` is then evaluated against whatever state the page is in.
     DONE = auto()
 
@@ -184,8 +193,9 @@ _ACTION_TOOL: Final[ToolParam] = {
                     "keys: press a key combination (e.g. 'Enter'). "
                     "scroll: scroll the page by amount pixels. "
                     "open: navigate to the url in text. "
+                    "wait: do nothing and give the page time to finish what it is doing. "
                     "reload: reload the current page, keeping the session. "
-                    "done: every declared step is complete, or no further progress is possible."
+                    "done: every declared action is complete, or no further progress is possible."
                 ),
             },
             "role": {
@@ -224,15 +234,15 @@ _READING_TOOL: Final[ToolParam] = {
 _SYSTEM_PROMPT: Final[str] = (
     "You are verifying a web app that another AI agent built for a non-technical client. You drive a "
     "real Chromium browser one action at a time.\n\n"
-    "You are given the flow's declared steps, the actions you have already taken -- each with what "
+    "You are given the actions the flow declares, the actions you have already taken -- each with what "
     "you expected of it and what the page actually did -- and the current page as its URL, its "
     "title and its accessibility tree. Choose the SINGLE next action.\n\n"
     "Rules:\n"
     "- Address an element by the ARIA role and accessible name the current page state gives it, spelled "
     "exactly as the tree spells them. Never invent a name the page does not show.\n"
-    "- Do exactly what the steps say. Do not improve the app, work around bugs, or try alternative "
+    "- Do exactly what the declared actions say. Do not improve the app, work around bugs, or try alternative "
     "routes to make a broken app look like it works -- the point is to find out whether it works.\n"
-    "- If the app is broken, unresponsive, or missing what the steps need, choose 'done' and say so in "
+    "- If the app is broken, unresponsive, or missing what the declared actions need, choose 'done' and say so in "
     "your reasoning rather than hunting for a workaround.\n"
     "- After typing into a field you usually need a separate action to submit it (press Enter, or "
     "click the button).\n"
@@ -240,24 +250,48 @@ _SYSTEM_PROMPT: Final[str] = (
     "element even when its role is not 'textbox': many apps make text editable in place, and no "
     "input element ever appears. Commit with Enter. Success shows as the element's text having "
     "changed, not as an edit control appearing.\n"
-    "- Never repeat an action the history says left the page unchanged. Clicking the same thing "
-    "again will change nothing; take the next plausible gesture instead (for an edit, 'input' into "
-    "the element, then Enter).\n"
+    "- Every action reports what the page did with it. 'nothing happened' means the page did not "
+    "react at all: never repeat that action, take the next plausible gesture instead (for an edit, "
+    "'input' into the element, then Enter). 'the page reacted but shows nothing new' means the "
+    "control acknowledged the gesture without a visible result -- a highlight, an armed state -- "
+    "and repeating it once may be exactly what that control wants.\n"
+    "- 'scroll' is the exception: it moves the viewport, which the page state cannot show, so it "
+    "reports 'nothing happened' even when it worked. Repeat it to reach further down the page.\n"
     "- More generally, where the history shows an action whose effect did not match what you "
     "expected of it, take that as the page telling you how it really works, and act on the "
     "corrected understanding rather than repeating the action.\n"
-    "- Choose 'done' as soon as every declared step has been carried out."
+    "- If the page shows a pending state -- a spinner, 'loading', 'saving', a disabled control that "
+    "should be enabled -- choose 'wait' and act on what the page shows afterwards. Do not act on "
+    "content that is still arriving.\n"
+    "- Choose 'reload' only where the declared actions say to reload. A reload the flow did not ask "
+    "for is a last resort for an app that has visibly stopped responding after waiting, and it "
+    "is recorded as such: an app that needs a reload to show its own state has already failed.\n"
+    "- Choose 'done' as soon as every declared action has been carried out."
 )
 
 _READING_SYSTEM_PROMPT: Final[str] = (
     "You are recording evidence about a web app that another AI agent built for a non-technical "
     "client.\n\n"
-    "A flow has just been driven through the app. Given the flow's steps and the final page state, "
+    "A flow has just been driven through the app. Given the actions the flow declares and the final page state, "
     "describe what that state actually shows.\n\n"
     "Report only what is observable: which elements are present, what they say, what state they are "
     "in. Do not decide whether the flow succeeded, do not score the app, and do not speculate about "
     "what was intended -- something else rules on that, from this description and the screenshots."
 )
+
+
+@pure
+def utc_now_iso() -> str:
+    """The timestamp every flow record and trace record carries."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+@pure
+def bounded_tail(text: str, max_chars: int) -> str:
+    """The tail of a long output, marked so a reader knows it was cut rather than empty."""
+    if len(text) <= max_chars:
+        return text
+    return "[...truncated...]\n" + text[-max_chars:]
 
 
 @pure
@@ -303,20 +337,20 @@ def fit_history(history: Sequence[str]) -> list[str]:
 
 
 @pure
-def build_action_prompt(flow_steps: str, history: tuple[str, ...], state_text: str) -> str:
+def build_action_prompt(flow_actions: str, history: tuple[str, ...], state_text: str) -> str:
     """The next-action prompt: what the flow asks for, what has been done, and what the page shows."""
     history_prose = "\n".join("{}. {}".format(index + 1, entry) for index, entry in enumerate(fit_history(history)))
     return (
-        "Flow steps to carry out:\n{steps}\n\nActions taken so far:\n{history}\n\nCurrent page state:\n{state}"
+        "Actions the flow declares:\n{actions}\n\nActions taken so far:\n{history}\n\nCurrent page state:\n{state}"
     ).format(
-        steps=flow_steps,
+        actions=flow_actions,
         history=history_prose or "(none yet -- this is the first action)",
         state=truncate_state(state_text) or "(the browser reported no page state)",
     )
 
 
 @pure
-def build_reading_prompt(flow_steps: str, history: tuple[str, ...], state_text: str) -> str:
+def build_reading_prompt(flow_actions: str, history: tuple[str, ...], state_text: str) -> str:
     """The closing prompt: what the flow asked for, what was done, and what the page ended up showing.
 
     The flow's `expect` is deliberately NOT included. Naming the condition invites the model to rule
@@ -324,9 +358,9 @@ def build_reading_prompt(flow_steps: str, history: tuple[str, ...], state_text: 
     """
     history_prose = "\n".join("{}. {}".format(index + 1, entry) for index, entry in enumerate(fit_history(history)))
     return (
-        "Flow steps that were carried out:\n{steps}\n\nActions actually taken:\n{history}\n\nFinal page state:\n{state}"
+        "Actions the flow declared:\n{actions}\n\nActions actually taken:\n{history}\n\nFinal page state:\n{state}"
     ).format(
-        steps=flow_steps,
+        actions=flow_actions,
         history=history_prose or "(no actions were taken)",
         state=truncate_state(state_text) or "(the browser reported no page state)",
     )
@@ -367,6 +401,8 @@ def describe_action(action: FlowAction) -> str:
             return "open {}".format(action.text)
         case FlowActionKind.RELOAD:
             return "reload the page"
+        case FlowActionKind.WAIT:
+            return "wait for the page to change"
         case FlowActionKind.DONE:
             return "finish the flow"
         case _ as unreachable:
@@ -449,13 +485,13 @@ class VerificationAgent(MutableModel, ABC):
 
     @abstractmethod
     def decide_next_action(
-        self, flow_steps: str, history: tuple[str, ...], state_text: str
+        self, flow_actions: str, history: tuple[str, ...], state_text: str
     ) -> tuple[FlowAction | None, VerifierCall]:
         """The single next browser action, or None when the call produced nothing usable."""
 
     @abstractmethod
     def read_final_state(
-        self, flow_steps: str, history: tuple[str, ...], state_text: str
+        self, flow_actions: str, history: tuple[str, ...], state_text: str
     ) -> tuple[FlowReading | None, VerifierCall]:
         """What the final page state shows, or None when the call produced nothing usable."""
 
@@ -475,17 +511,19 @@ class AnthropicVerificationAgent(VerificationAgent):
         return call
 
     def decide_next_action(
-        self, flow_steps: str, history: tuple[str, ...], state_text: str
+        self, flow_actions: str, history: tuple[str, ...], state_text: str
     ) -> tuple[FlowAction | None, VerifierCall]:
-        call = self._call(_SYSTEM_PROMPT, build_action_prompt(flow_steps, history, state_text), _ACTION_TOOL)
+        call = self._call(_SYSTEM_PROMPT, build_action_prompt(flow_actions, history, state_text), _ACTION_TOOL)
         if call.tool_input is None:
             return None, call
         return parse_action(call.tool_input), call
 
     def read_final_state(
-        self, flow_steps: str, history: tuple[str, ...], state_text: str
+        self, flow_actions: str, history: tuple[str, ...], state_text: str
     ) -> tuple[FlowReading | None, VerifierCall]:
-        call = self._call(_READING_SYSTEM_PROMPT, build_reading_prompt(flow_steps, history, state_text), _READING_TOOL)
+        call = self._call(
+            _READING_SYSTEM_PROMPT, build_reading_prompt(flow_actions, history, state_text), _READING_TOOL
+        )
         observation = str((call.tool_input or {}).get("observation") or "").strip()
         if not observation:
             return None, call
@@ -540,6 +578,13 @@ BOX_CHROMIUM_PROFILE_PREFIX: Final[str] = "/tmp/minds-evals-chromium-"
 
 
 @pure
+def flow_screenshot_name(step_index: int) -> str:
+    """The frame a step writes. Zero-padded so a plain sort of a flow's directory is chronological,
+    which is also what keeps rewardkit's own path sort of the judge's screenshots chronological."""
+    return "step_{:03d}.png".format(step_index)
+
+
+@pure
 def flow_browser_port(flow_index: int) -> int:
     """The CDP port the flow at this index drives."""
     return CDP_BASE_PORT + flow_index
@@ -588,6 +633,11 @@ REASON_ACTION_TIMED_OUT: Final[str] = flow_step_protocol.REASON_ACTION_TIMED_OUT
 # address, so it must not be charged to the agent the way an empty registry is.
 REASON_WORKSPACE_UNADDRESSABLE: Final[str] = "workspace_unaddressable"
 
+# The harness ran out of time, which says nothing about the app. Recorded on every kind of entry
+# the evidence collector writes, not only on flows, and it lives with the rest of the vocabulary
+# rather than beside any one of its readers.
+REASON_TIMEOUT: Final[str] = "timeout"
+
 # Reasons recorded on a flow the WORKSPACE fell short of.
 REASON_NO_APP_TO_OPEN: Final[str] = "no_app_to_open"
 REASON_STEP_BUDGET_EXHAUSTED: Final[str] = "step_budget_exhausted"
@@ -616,6 +666,7 @@ class StepOutcome(FrozenModel):
     detail: str = Field(description="Bounded error text from the executor")
     state_text: str = Field(description="The page after the action: URL, title and its ARIA tree")
     screenshot_name: str = Field(description="The frame captured after the action, empty when none was")
+    reaction: StepReaction = Field(description="What the page's DOM did after the action, where the step watched")
 
 
 @pure
@@ -652,6 +703,7 @@ def parse_step_result(stdout: str) -> StepOutcome:
         detail=result.detail,
         state_text=render_page_state(result.url, result.title, result.snapshot),
         screenshot_name=result.screenshot_path.rsplit("/", 1)[-1],
+        reaction=result.reaction,
     )
 
 
@@ -664,6 +716,7 @@ def _bridge_failure(stdout: str) -> StepOutcome:
         detail=stdout[:MAX_STEP_DETAIL_CHARS],
         state_text="",
         screenshot_name="",
+        reaction=StepReaction.UNOBSERVED,
     )
 
 
@@ -757,10 +810,6 @@ def browser_launch_command(flow_index: int) -> str:
     Backgrounded with setsid, because `environment.exec` returns as soon as its command does and
     the browser has to outlive it. The resolved path is echoed so the trace records which binary
     actually ran.
-
-    --no-sandbox because the box runs as root, which is where Chromium refuses to start its
-    sandbox; --disable-dev-shm-usage because a container's default /dev/shm is too small for
-    Chromium's renderer and it crashes in ways that read as a broken app.
     """
     return (
         'profile={profile}; pkill -f {stale} || true; rm -rf "$profile"; mkdir -p "$profile"; '
@@ -771,12 +820,11 @@ def browser_launch_command(flow_index: int) -> str:
         # shell, and a shell launched with --headless=new dies on the flag rather than serving CDP.
         'case "$chrome" in *headless*) '
         'echo "playwright resolved the headless shell, which --headless=new cannot run: $chrome"; exit 97;; esac; '
-        'setsid nohup "$chrome" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage '
-        "--remote-debugging-address=127.0.0.1 --remote-debugging-port={port} "
-        '--user-data-dir="$profile" --ignore-certificate-errors '
+        'setsid nohup "$chrome" {flags} --remote-debugging-port={port} --user-data-dir="$profile" '
         "> {launch_log} 2>&1 < /dev/null & "
         'echo "launched $chrome"'
     ).format(
+        flags=" ".join(flow_browser.CHROMIUM_LAUNCH_FLAGS),
         profile=shlex.quote(flow_profile_dir(flow_index)),
         stale=shlex.quote("[-]-user-data-dir={}".format(BOX_CHROMIUM_PROFILE_PREFIX)),
         resolve=chromium_path_command(),
@@ -809,11 +857,26 @@ def step_command(step_request: str) -> str:
     )
 
 
-# What a state summary says when the two states are identical. Kept as one fixed sentence because
-# it is the signal an agent loops hardest without: an action that landed and changed nothing
-# (observed: 15 identical clicks on an in-place-editable heading whose only click feedback was a
-# CSS focus wash).
+# What a step's effect says when the accessible tree is identical before and after. Kept as fixed
+# sentences because they are the signal an agent loops hardest without: an action that landed and
+# changed nothing (observed: 15 identical clicks on an in-place-editable heading whose only click
+# feedback was a CSS focus wash). Which sentence depends on what the executor saw the DOM do, since
+# a dead control and a control that answered with nothing but a highlight look the same in the tree
+# and call for opposite next moves.
 UNCHANGED_STATE_SUMMARY: Final[str] = "the page state is exactly the same as before that action"
+NO_REACTION_SUMMARY: Final[str] = (
+    "nothing happened: the page did not react to that action at all, and shows exactly what it showed before"
+)
+ACKNOWLEDGED_ONLY_SUMMARY: Final[str] = (
+    "the page reacted but shows nothing new: something changed in the page that is not visible in its "
+    "accessible tree (a highlight, an armed state, a style), and the tree is exactly as before"
+)
+STILL_CHANGING_UNCHANGED_SUMMARY: Final[str] = (
+    "the page keeps changing on its own (a timer, a poll or an animation), but its accessible tree is "
+    "exactly the same as before that action"
+)
+# Prefixed to a real change when the page had not gone quiet by the time it was read.
+STILL_CHANGING_PREFIX: Final[str] = "(the page was still changing when it was read)"
 
 
 # What a browser rewrites on every render rather than because the page changed: element ids are
@@ -862,6 +925,35 @@ def summarize_state_change(previous_state: str, current_state: str) -> str:
     if changed > MIN_REPLACEMENT_LINES and changed / largest > MAX_SUMMARY_CHANGE_RATIO:
         return "most of the page changed: {} lines gone, {} new, of {}".format(len(removed), len(added), largest)
     return "\n".join(_summary_lines(added, "new:") + _summary_lines(removed, "gone:"))
+
+
+@pure
+def summarize_step_effect(previous_state: str, current_state: str, reaction: StepReaction) -> str:
+    """What a step did to the page, for the agent's history and the flow log: the tree's movement,
+    qualified by what the executor saw the DOM do.
+
+    An identical tree is the case that needs qualifying. Without the DOM's side of the story it
+    reads as "nothing happened" whether the control was dead or merely acknowledged the gesture
+    with a style, and those call for opposite next moves. A tree that DID move speaks for itself;
+    the reaction only adds a note when the page had not settled by the time it was read, so the
+    agent knows the state it is looking at may still be moving.
+    """
+    tree_summary = summarize_state_change(previous_state, current_state)
+    if tree_summary != UNCHANGED_STATE_SUMMARY:
+        if reaction is StepReaction.STILL_CHANGING:
+            return "{} {}".format(STILL_CHANGING_PREFIX, tree_summary)
+        return tree_summary
+    match reaction:
+        case StepReaction.UNOBSERVED:
+            return UNCHANGED_STATE_SUMMARY
+        case StepReaction.NONE:
+            return NO_REACTION_SUMMARY
+        case StepReaction.SETTLED:
+            return ACKNOWLEDGED_ONLY_SUMMARY
+        case StepReaction.STILL_CHANGING:
+            return STILL_CHANGING_UNCHANGED_SUMMARY
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 @pure
@@ -966,6 +1058,7 @@ def flow_step_record(
     reasoning: str,
     expected: str,
     observed: str,
+    reaction: StepReaction,
     state_text: str,
     screenshot_name: str,
     error: str,
@@ -982,6 +1075,10 @@ def flow_step_record(
     evidence, so a step that shows "click the button named 'Delete'" followed by an unchanged
     screenshot -- with nothing saying the click never landed -- would actively mislead it.
 
+    ``reaction`` is the executor's own word on what the DOM did, kept as the raw value beside the
+    prose ``observed`` derives from it, so a reader tallying how often a flow's actions went
+    unanswered can count it rather than parse sentences.
+
     The state is recorded UNTRUNCATED: the judge reads this file, and it is the cheap, token-dense
     alternative to looking at screenshots.
 
@@ -995,6 +1092,7 @@ def flow_step_record(
             "reasoning": reasoning,
             "expected": expected,
             "observed": observed,
+            "reaction": reaction.value,
             "state": state_text,
             "screenshot": screenshot_name,
             "error": error,
