@@ -337,7 +337,11 @@ def test_scan_worker_launches_reads_a_codex_code_mode_program() -> None:
 def test_graft_embeds_the_worker_under_its_launching_call() -> None:
     document = atif_document_with_worker_launch()
     worker = EmbeddedWorker(
-        launch=worker_launch(), document=worker_document(WORKER_AGENT_ID), state=WorkerState.STOPPED, report_path="r"
+        launch=worker_launch(),
+        document=worker_document(WORKER_AGENT_ID),
+        agent_id=WORKER_AGENT_ID,
+        state=WorkerState.STOPPED,
+        report_path="r",
     )
 
     grafted = graft_worker_trajectories(document, [worker])
@@ -368,7 +372,11 @@ def test_graft_synthesizes_a_pending_result_when_the_launch_has_no_output() -> N
     document = atif_document_with_worker_launch()
     document["steps"][2].pop("observation")
     worker = EmbeddedWorker(
-        launch=worker_launch(), document=worker_document(WORKER_AGENT_ID), state=WorkerState.STOPPED, report_path=""
+        launch=worker_launch(),
+        document=worker_document(WORKER_AGENT_ID),
+        agent_id=WORKER_AGENT_ID,
+        state=WorkerState.STOPPED,
+        report_path="",
     )
 
     grafted = graft_worker_trajectories(document, [worker])
@@ -387,7 +395,11 @@ def test_graft_synthesizes_a_pending_result_when_the_launch_has_no_output() -> N
 
 def test_graft_still_embeds_a_worker_whose_launching_call_is_missing() -> None:
     worker = EmbeddedWorker(
-        launch=worker_launch(), document=worker_document(WORKER_AGENT_ID), state=WorkerState.STOPPED, report_path=""
+        launch=worker_launch(),
+        document=worker_document(WORKER_AGENT_ID),
+        agent_id=WORKER_AGENT_ID,
+        state=WorkerState.STOPPED,
+        report_path="",
     )
 
     grafted = graft_worker_trajectories(atif_document(), [worker])
@@ -398,7 +410,11 @@ def test_graft_still_embeds_a_worker_whose_launching_call_is_missing() -> None:
 
 def test_workspace_trajectory_embeds_workers_and_still_validates() -> None:
     worker = EmbeddedWorker(
-        launch=worker_launch(), document=worker_document(WORKER_AGENT_ID), state=WorkerState.STOPPED, report_path=""
+        launch=worker_launch(),
+        document=worker_document(WORKER_AGENT_ID),
+        agent_id=WORKER_AGENT_ID,
+        state=WorkerState.STOPPED,
+        report_path="",
     )
 
     built = build_workspace_trajectory(
@@ -422,6 +438,7 @@ def test_workspace_trajectory_refuses_two_workers_with_one_id() -> None:
         EmbeddedWorker(
             launch=worker_launch(name=name),
             document=worker_document(WORKER_AGENT_ID),
+            agent_id=WORKER_AGENT_ID,
             state=WorkerState.STOPPED,
             report_path="",
         )

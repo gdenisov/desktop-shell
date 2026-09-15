@@ -233,6 +233,13 @@ class EmbeddedWorker(FrozenModel):
 
     launch: WorkerLaunch = Field(description="The launch the worker answers to")
     document: dict[str, Any] = Field(description="The worker's ATIF document, as a JSON-shaped dict")
+    agent_id: str = Field(
+        description=(
+            "The mngr agent id the capture resolved, empty when it resolved none. Distinct from the "
+            "document's trajectory_id, which falls back to a launch-derived stand-in so an "
+            "unidentified worker's evidence is still embedded."
+        )
+    )
     state: WorkerState = Field(description="The worker's state at collection time")
     report_path: str = Field(description="Bundle-relative path of the captured reports directory, or empty")
 
@@ -566,7 +573,7 @@ def graft_worker_trajectories(document: Mapping[str, Any], workers: Sequence[Emb
                     "subagent_kind": MNGR_SUBAGENT_KIND,
                     "worker": {
                         "name": worker.launch.name,
-                        "agent_id": worker_id,
+                        "agent_id": worker.agent_id,
                         "state": worker.state.value,
                         "lead_agent_id": document.get("session_id"),
                         "launch_tool_call_id": worker.launch.tool_call_id,

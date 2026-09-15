@@ -81,11 +81,17 @@ The human gate. CI builds one clean machine and sends it one message; it never
 sees an upgraded workspace, a share, a terminal, or latchkey. The 0.4.3 rehearsal
 caught a release-blocking bug with every CI gate green.
 
-1. Bake at the tag → **pool-hosts.md**, `<tier>` = `staging`. Bake more than you
+1. Deploy the services → **services.md**, `<tier>` = `staging`. Same order as
+   production, deploy first: the release's clients talk to this server, and the
+   rehearsal is what proves the two agree. Staging has no update feed, so the
+   deploy also moves its browser-create pin to the new tag at once; the only
+   cost is that browser-chrome creates on staging answer 503 until the next
+   step lands, which is acceptable there. Do not bake before the deploy.
+2. Bake at the tag → **pool-hosts.md**, `<tier>` = `staging`. Bake more than you
    will demo; the rehearsal's own testing consumes them.
-2. Verify the app → **app-release.md**, *Verifying a release in a running
+3. Verify the app → **app-release.md**, *Verifying a release in a running
    workspace*. Put the checkout on the release commit **first**.
-3. Retire what you baked, by id → **pool-hosts.md**. Never `pool teardown-slices`
+4. Retire what you baked, by id → **pool-hosts.md**. Never `pool teardown-slices`
    on a shared tier — it takes no filter.
 
 If anything fails the release is not ready. Fix it and cut the **next** version;
@@ -116,8 +122,9 @@ until step 4, so keep `available` rows at the old tag until then.
 
 Staging and dev envs have no update feed, so there the deploy-time pin
 (`FALLBACK_BRANCH`, or an explicit `MINDS_WEB_TEMPLATE_REF`) is the live one and
-the order inverts: bake before you deploy, or browser creates on that tier break
-until the bake lands.
+a deploy moves browser creates to the new tag at once. The order does **not**
+invert: deploy first there too (step 2 above), and accept that browser-chrome
+creates on that tier answer 503 until the bake lands.
 
 Then tell internal users. Their reports are the last signal before the channels
 move.

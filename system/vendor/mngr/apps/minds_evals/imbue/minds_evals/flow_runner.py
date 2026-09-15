@@ -14,6 +14,7 @@ from abc import ABC
 from abc import abstractmethod
 from typing import Final
 
+from loguru import logger
 from pydantic import Field
 
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -72,6 +73,7 @@ def opening_action(target_url: str) -> ui_flows.FlowAction:
         kind=ui_flows.FlowActionKind.OPEN,
         role="",
         target="",
+        ref="",
         text=target_url,
         amount=0,
         reasoning="the flow has not opened the app yet",
@@ -134,12 +136,35 @@ async def run_flow(
                 detail="the flow did not finish within its deadline",
                 records=tuple(records),
             )
-        action, _call = agent.decide_next_action(check.actions, tuple(history), state_text)
+        action, call = agent.decide_next_action(check.actions, tuple(history), state_text)
         if action is None:
+            # Recorded as a step that did not run, so the log shows the page the decision was made
+            # on and what the decision asked for; the reader otherwise sees a flow that stopped
+            # after a step that worked, with the manifest naming only the layer.
+            detail = "the verification agent returned no usable action: {}".format(
+                ui_flows.describe_unusable_action(call.tool_input)
+            )
+            logger.warning("The verification agent's decision could not be acted on: {}", detail)
+            payload = call.tool_input or {}
+            records.append(
+                ui_flows.flow_step_record(
+                    step_index,
+                    ui_flows.UNUSABLE_ACTION,
+                    "",
+                    str(payload.get("reasoning") or "").strip(),
+                    str(payload.get("expected") or "").strip(),
+                    "",
+                    StepReaction.UNOBSERVED,
+                    state_text,
+                    "",
+                    detail,
+                    ui_flows.utc_now_iso(),
+                )
+            )
             return FlowRun(
                 status=CheckStatus.ERROR,
                 reason=ui_flows.REASON_VERIFIER_AGENT_FAILED,
-                detail="the verification agent returned no usable action",
+                detail=detail,
                 records=tuple(records),
             )
         described = ui_flows.describe_action(action)
@@ -148,6 +173,7 @@ async def run_flow(
                 ui_flows.flow_step_record(
                     step_index,
                     described,
+                    action.ref,
                     action.reasoning,
                     action.expected,
                     "",
@@ -166,6 +192,7 @@ async def run_flow(
                 ui_flows.flow_step_record(
                     step_index,
                     described,
+                    action.ref,
                     action.reasoning,
                     action.expected,
                     "",
@@ -194,6 +221,7 @@ async def run_flow(
             ui_flows.flow_step_record(
                 step_index,
                 described,
+                action.ref,
                 action.reasoning,
                 action.expected,
                 observed,

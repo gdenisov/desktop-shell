@@ -24,6 +24,7 @@ from flow_step_protocol import QUIET_MS
 from flow_step_protocol import REASON_ACTION_TIMED_OUT
 from flow_step_protocol import REASON_CDP_CONNECT_FAILED
 from flow_step_protocol import REASON_FORWARD_UNREACHABLE
+from flow_step_protocol import REASON_STALE_REF
 from flow_step_protocol import REASON_STEP_ERROR
 from flow_step_protocol import REASON_TLS_REFUSED
 from flow_step_protocol import REASON_TUNNEL_DOWN
@@ -37,6 +38,8 @@ from flow_step_protocol import StepRequest
 from flow_step_protocol import StepResult
 from flow_step_protocol import WAIT_ACTION_CAP_MS
 from flow_step_protocol import request_error_reason
+from flow_step_protocol import snapshot_line_for_ref
+from flow_step_protocol import snapshot_line_role
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
@@ -53,6 +56,12 @@ class UnknownActionError(Exception):
 
 class MissingContextError(Exception):
     """The connected browser exposes no context at all -- an instrument failure, not an app one."""
+
+
+class StaleRefError(Exception):
+    """A ref the action addressed does not name what the agent read it off: the element is gone,
+    or the page changed and the number now sits on something else. The action did not run; the
+    page below is captured as it stands, and the flow carries on from what it now shows."""
 
 
 class ReactionWatchError(Exception):
@@ -159,15 +168,17 @@ def _transport_reason(message: str) -> str:
 def classify_exception(exc: BaseException) -> str:
     """Which layer a failure implicates, decided by TYPE and only then by text.
 
-    Type is what separates the three things a step can mean, and prose cannot: a timeout is the
-    page failing to offer what was asked for (the app's shortfall), an unknown action kind is the
-    harness contradicting itself, and everything else out of the executor -- the reaction watch
-    included -- is the executor. Only within a Playwright error does the message get a say, and only
-    to name which transport hop broke -- an unrecognised one stays an executor failure rather than
-    being charged to the app.
+    Type is what separates the things a step can mean, and prose cannot: a timeout is the page
+    failing to offer what was asked for (the app's shortfall), a stale ref is the agent addressing
+    a page that has moved on, an unknown action kind is the harness contradicting itself, and
+    everything else out of the executor -- the reaction watch included -- is the executor. Only
+    within a Playwright error does the message get a say, and only to name which transport hop
+    broke -- an unrecognised one stays an executor failure rather than being charged to the app.
     """
     if isinstance(exc, UnknownActionError):
         return REASON_UNKNOWN_ACTION
+    if isinstance(exc, StaleRefError):
+        return REASON_STALE_REF
     if isinstance(exc, PlaywrightTimeoutError):
         return REASON_ACTION_TIMED_OUT
     if isinstance(exc, PlaywrightError):
@@ -208,6 +219,35 @@ def _playwright_cookie(cookie: StepCookie) -> dict[str, Any]:
     }
 
 
+def _locate(page: Any, action: StepAction, default_role: str) -> Any:
+    """The element an action addresses: by role and name, or -- for an element the snapshot listed
+    with no name -- by the ref that snapshot printed for it.
+
+    A ref is only meaningful against the snapshot that assigned it, and refs live in the connection
+    that took that snapshot, so this connection takes a snapshot of its own first: numbering runs in
+    document order, so an unchanged page gets the same numbers the agent read. The role the ref was
+    read on -- which every ref carries, since a ref without one is refused at the boundary -- is
+    checked against that fresh snapshot, because a page that changed in between can leave the
+    number on a different element, and acting on it would put a click the agent never asked for
+    into the record.
+    """
+    if not action.ref:
+        return page.get_by_role(action.role or default_role, name=action.target).first
+    line = snapshot_line_for_ref(page.aria_snapshot(mode=_SNAPSHOT_MODE), action.ref)
+    if not line:
+        raise StaleRefError(
+            "ref {} is not on the page any more; address the element from the current page state".format(action.ref)
+        )
+    role = snapshot_line_role(line)
+    if role != action.role:
+        raise StaleRefError(
+            "ref {} names a {} now, not a {}: the page changed; address the element from the current page state".format(
+                action.ref, role or "non-element", action.role
+            )
+        )
+    return page.locator("aria-ref={}".format(action.ref))
+
+
 def _perform(page: Any, action: StepAction) -> None:
     """Carry out one decided action. A kind with no branch here raises rather than silently doing
     nothing: the caller reports that as the harness contradicting itself, not as the app failing."""
@@ -223,12 +263,10 @@ def _perform(page: Any, action: StepAction) -> None:
         page.reload(wait_until="networkidle", timeout=_NAVIGATION_TIMEOUT_MS)
         return
     if action.kind is StepActionKind.CLICK:
-        page.get_by_role(action.role or "button", name=action.target).first.click(timeout=_DEFAULT_TIMEOUT_MS)
+        _locate(page, action, "button").click(timeout=_DEFAULT_TIMEOUT_MS)
         return
     if action.kind is StepActionKind.INPUT:
-        page.get_by_role(action.role or "textbox", name=action.target).first.fill(
-            action.text, timeout=_DEFAULT_TIMEOUT_MS
-        )
+        _locate(page, action, "textbox").fill(action.text, timeout=_DEFAULT_TIMEOUT_MS)
         return
     if action.kind is StepActionKind.KEYS:
         page.keyboard.press(action.text or "Enter")
@@ -346,17 +384,32 @@ def run_step(request: StepRequest) -> StepResult:
                 # Installed before the flow's first navigation, so the opening request is already
                 # authenticated.
                 context.add_cookies([_playwright_cookie(request.cookie)])
-            page = context.pages[0] if context.pages else context.new_page()
+            page = _resolve_page(context)
             reason = ""
             detail = ""
             reaction = StepReaction.UNOBSERVED
             try:
                 reaction = _perform_and_watch(page, context.new_cdp_session(page), request.action)
-            except (PlaywrightError, UnknownActionError, ReactionWatchError) as exc:
+            except (PlaywrightError, UnknownActionError, ReactionWatchError, StaleRefError) as exc:
                 # The action failed, but the PAGE is still readable -- and what it shows is the
                 # most useful thing the flow can record, so capture it before returning.
                 reason = classify_exception(exc)
                 detail = _bounded(exc)
+            if request.action.ref:
+                try:
+                    browser, page = _reconnected_page(playwright, browser, request.cdp_endpoint)
+                except (PlaywrightError, MissingContextError) as exc:
+                    # Reconnecting is this script talking to its own browser, so a failure here is
+                    # the CDP endpoint and nothing the forwarded origin did -- which is what
+                    # `classify_exception` would read out of the message text instead. There is no
+                    # connection left to capture the page from, and the action's own verdict, where
+                    # it has one, stays the informative one.
+                    return StepResult(
+                        is_ok=False,
+                        reason=reason or REASON_CDP_CONNECT_FAILED,
+                        detail=detail or _bounded(exc),
+                        reaction=reaction,
+                    )
             capture = _capture(page, request.screenshot_path)
             # A page that could not be read only gets to speak when the action itself said nothing:
             # the first failure is the informative one.
@@ -376,6 +429,29 @@ def run_step(request: StepRequest) -> StepResult:
             # Only the CDP connection is closed. Closing the browser would end the session the next
             # step depends on.
             browser.close()
+
+
+def _reconnected_page(playwright: Any, browser: Any, cdp_endpoint: str) -> tuple[Any, Any]:
+    """A connection of this script's own in place of `browser`, and the page it drives.
+
+    A ref lookup numbers the connection that took the snapshot, and a later snapshot on that same
+    connection keeps those numbers and continues them for whatever is new. The next step numbers
+    the page afresh, so the capture the agent reads its next ref off must too.
+    """
+    browser.close()
+    reconnected = playwright.chromium.connect_over_cdp(cdp_endpoint)
+    try:
+        return reconnected, _resolve_page(_resolve_context(reconnected))
+    except (PlaywrightError, MissingContextError):
+        # The caller only ever holds the connection this returns, so one that fails on the way out
+        # has to close itself or nothing will.
+        reconnected.close()
+        raise
+
+
+def _resolve_page(context: Any) -> Any:
+    """The page every step drives: the context's first, opened by the flow's first step."""
+    return context.pages[0] if context.pages else context.new_page()
 
 
 def _resolve_context(browser: Any) -> Any:
