@@ -19,3 +19,10 @@ Issue #521 (imbue-ai/default-workspace-template) motivates a per-chat WebSocket 
 Both deployed browser paths already negotiate HTTP/2: `minds run` spawns `mngr forward --use-http2` unconditionally (`apps/minds/imbue/minds/desktop_client/forward_cli.py`), and the share gateway's Caddyfile pins `protocols h1 h2`, so the cap does not apply; the practical ceiling is hypercorn's 100 concurrent h2 streams per client connection.
 Noticed while writing the (since replaced) split-chat-apart plan; its successor, default-workspace-template's `docs/system/blueprint/workspace-app-model/plan-workspace-app-model.md`, keeps SSE as the per-chat transport and treats the channel consolidation as a chat-internal cleanup.
 Resolve by updating the issue: the chat app runs as its own program (default-workspace-template's `system/apps/chat`).
+
+## MapReduceRecipe docstring claims the framework uploads the report
+
+`libs/mngr_mapreduce/imbue/mngr_mapreduce/data_types.py` (the `MapReduceRecipe` docstring, around lines 186-187) says the framework best-effort-uploads the rendered report.
+The framework only calls `render_report` (`orchestration.py`, around lines 49-54); the upload lives in the TMR recipe (`libs/mngr_tmr/imbue/mngr_tmr/report_upload.py`).
+Noticed while writing `specs/behaviors-mapreduce/spec.md`; it assumes the code is correct and treats upload as recipe-side.
+

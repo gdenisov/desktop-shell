@@ -21,6 +21,7 @@ from imbue.minds_admin.slices.cutover_types import classify_unplaced_gen1_row
 from imbue.minds_admin.slices.cutover_types import gen1_data_disk_size_error_or_none
 from imbue.minds_admin.slices.cutover_types import is_version_at_or_above_floor
 from imbue.minds_admin.slices.cutover_types import parse_version_tag
+from imbue.minds_admin.slices.cutover_types import restamped_gen1_disk_gb_or_none
 from imbue.minds_admin.slices.cutover_types import version_tag_error_or_none
 from imbue.minds_admin.slices.testing import make_cutover_workspace_state
 from imbue.minds_admin.slices.testing import make_harvested_file
@@ -213,3 +214,13 @@ def test_workspace_records_written_before_the_latchkey_leg_still_parse() -> None
     del dumped["latchkey_replay_plan"]
     reread = CutoverWorkspaceState.model_validate(dumped)
     assert reread.latchkey_replay_plan is None
+
+
+def test_unmeasured_039_disk_stamp_is_restamped_from_the_measured_disk() -> None:
+    # A row stopped on no box when 039 ran carries the default 44; its 29 GiB disk belongs to a 45 GiB row.
+    assert restamped_gen1_disk_gb_or_none(29, 44) == 45
+    # A 28 GiB disk agrees with the stamp, so nothing is restamped.
+    assert restamped_gen1_disk_gb_or_none(28, 44) is None
+    # A measured stamp that disagrees stays a refusal, never a silent restamp.
+    assert restamped_gen1_disk_gb_or_none(30, 45) is None
+    assert gen1_data_disk_size_error_or_none(30, 45) is not None
