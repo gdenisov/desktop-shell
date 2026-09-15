@@ -118,6 +118,7 @@ CUTOVER_TRANSPLANT_ROOT: Final[str] = f"{GEN2_STORAGE_ROOT}/cutover"
 SSHD_HOST_KEY_PATH: Final[str] = "/etc/ssh/ssh_host_ed25519_key"
 ROOT_AUTHORIZED_KEYS_PATH: Final[str] = "/root/.ssh/authorized_keys"
 # The workspace checkout inside the container, where the version tag is read.
+WORKSPACE_HOME_PATH: Final[str] = "/home/user"
 WORKSPACE_CHECKOUT_PATH: Final[str] = "/home/user/workspace"
 # The system_interface the health probe curls inside the container.
 SYSTEM_INTERFACE_URL: Final[str] = "http://127.0.0.1:8000/"
@@ -412,13 +413,73 @@ def build_container_id_command(host_id: str) -> str:
 
 
 @pure
+def build_workspace_version_probe_script(checkout_path: str) -> str:
+    """A shell script printing the workspace checkout's release version: its nearest ``minds-v*`` tag, else the vendored pin.
+
+    A workspace created from a branch rather than a release tag holds no tags at
+    all (the desktop's single-branch clone fetches heads only), so ``git describe``
+    finds nothing. Its vendored mngr still names the release it was cut from in
+    ``FALLBACK_BRANCH``, which is the release image whose system layers match it,
+    so that pin is the fallback. Prints nothing (and exits 0) when neither source
+    names a version, so the caller reports the version, not a shell error.
+    """
+    describe = (
+        f"git -c safe.directory={checkout_path} -C {checkout_path} describe --tags --match 'minds-v*' --abbrev=0"
+    )
+    vendored_build_info = f"{checkout_path}/system/vendor/mngr/apps/minds/imbue/minds/build_info.py"
+    read_pin = (
+        f"sed -n 's/^FALLBACK_BRANCH: Final\\[str\\] = \"\\(minds-v[0-9][0-9.]*\\)\"$/\\1/p' {vendored_build_info}"
+    )
+    return f"{describe} 2>/dev/null || {read_pin} 2>/dev/null || true"
+
+
+@pure
 def build_git_describe_command(container_id: str) -> str:
-    """The version probe: the nearest ``minds-v*`` tag of the workspace checkout, read inside the container."""
+    """The version probe (``build_workspace_version_probe_script``), run inside the workspace container."""
+    inner = build_workspace_version_probe_script(WORKSPACE_CHECKOUT_PATH)
+    return f"docker exec --workdir / {shlex.quote(container_id)} sh -c {shlex.quote(inner)}"
+
+
+# The home-layout verdicts the probe prints; the same classification as the
+# ``repair-home-layout`` operator command's in-VM script.
+HOME_LAYOUT_HOME: Final[str] = "home"
+HOME_LAYOUT_LEGACY: Final[str] = "legacy"
+HOME_LAYOUT_UNKNOWN: Final[str] = "unknown"
+
+
+@pure
+def build_home_layout_probe_command(container_id: str) -> str:
+    """Print ``home`` / ``legacy`` / ``unknown`` for the workspace container's home layout.
+
+    ``home``: ``/home/user`` is a symlink onto the volume's ``home/`` (the bake
+    layout, where the data disk carries the whole home tree). ``legacy``: a real
+    ``/home/user`` in the container's writable layer with only ``.mngr`` on the
+    volume -- the slow-path rebuild layout ``repair-home-layout`` exists for.
+    """
     inner = (
-        f"git -c safe.directory={WORKSPACE_CHECKOUT_PATH} -C {WORKSPACE_CHECKOUT_PATH} "
-        "describe --tags --match 'minds-v*' --abbrev=0"
+        f"if [ -L {WORKSPACE_HOME_PATH} ]; then echo {HOME_LAYOUT_HOME}; "
+        f"elif [ -d {WORKSPACE_HOME_PATH} ] && [ -L {WORKSPACE_HOME_PATH}/.mngr ]; then echo {HOME_LAYOUT_LEGACY}; "
+        f"else echo {HOME_LAYOUT_UNKNOWN}; fi"
     )
     return f"docker exec --workdir / {shlex.quote(container_id)} sh -c {shlex.quote(inner)}"
+
+
+@pure
+def home_layout_error_or_none(probe_output: str, host_id: str) -> str | None:
+    """Why the container's home layout blocks a migration, or None when the data disk carries the home tree.
+
+    The migrate transplants the data disk only, so a workspace whose home lives
+    in the container's writable layer would come back empty.
+    """
+    layout = probe_output.strip()
+    if layout == HOME_LAYOUT_HOME:
+        return None
+    remedy = f"run `minds-admin repair-home-layout --host-id {host_id} --migrate` on its gen-1 box first"
+    if layout == HOME_LAYOUT_LEGACY:
+        return (
+            f"legacy home layout: /home/user lives in the container's writable layer, not on the data disk; {remedy}"
+        )
+    return f"unrecognized home layout {layout!r}: /home/user is neither a symlink onto the volume nor a legacy tree; {remedy}"
 
 
 @pure

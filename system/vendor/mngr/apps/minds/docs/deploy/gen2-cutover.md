@@ -115,7 +115,20 @@ stop kinds (migration 042).
   then -- never mid-migration.
 - The workspace version floor is `minds-v0.3.10`: older workspaces are refused
   by the preflight. Ask their owners to run `update-self`, or accept losing
-  them.
+  them. A workspace created from a branch rather than a release tag holds no
+  tags; its version is then read from its vendored mngr's `FALLBACK_BRANCH`.
+- Every workspace must be on the `home/` volume layout: the migrate transplants
+  the data disk only, and a slow-path-rebuilt workspace on the legacy layout
+  keeps `/home/user` in the container's writable layer, so it would come back
+  empty. Run `minds-admin repair-home-layout --all-leased` (probe) on the tier
+  and `--host-id <id> --migrate` each `legacy_layout` workspace on its gen-1
+  box first; the preflight and the harvest refuse a legacy layout and name
+  this remedy. Staging had three such workspaces out of eight (2026-09-15).
+- Templates before `minds-v0.5.0` bake only through the migrate's image seed
+  (they name settings fields today's mngr renamed, and create a boot chat the
+  pool bake refuses); the seed tolerates both. A gen-1 row that was stopped on
+  no box when migration 039 ran carries `disk_gb = 44` (039's fallback); the
+  migrate restamps it from the measured disk at the harvest.
 - Migration announcement (per cohort, not per tier): the workspace stops,
   moves, and comes back at a new address on its own; expect minutes to tens of
   minutes of downtime depending on data size; afterwards the container runs
@@ -202,7 +215,11 @@ way out, which is what the state files and locks are for).
 
 Re-run the same `migrate` invocation: it resumes from the state file (a
 finished stop is not re-run; a transplanted disk is rescued from a half-built
-slice; the reserve reclaims its own leftover dir). If the health probe keeps
+slice; the reserve reclaims its own leftover dir). A `--source-server-id`
+sweep re-selects the rows an earlier run parked off that box onto the same
+target even though a parked row no longer sits on any box (its state record's
+origin ties it to the sweep); a row parked onto a *different* target is
+reported in the log and left for the invocation that owns it. If the health probe keeps
 failing, inspect the slice on the target box (VM SSH with your operator
 certificate -- `ssh -i ~/.mindsadmin/<tier>/ssh_id -p <reserved port> root@<box>`
 -- at the reserved port) -- the row stays parked (users see the 409) until the probe

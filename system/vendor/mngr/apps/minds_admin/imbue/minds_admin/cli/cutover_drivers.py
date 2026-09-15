@@ -77,6 +77,7 @@ from imbue.minds_admin.slices.cutover_db import fetch_pool_rows_on_server
 from imbue.minds_admin.slices.cutover_db import fetch_unplaced_gen1_pool_rows
 from imbue.minds_admin.slices.cutover_db import finish_restore_pool_host
 from imbue.minds_admin.slices.cutover_db import park_pool_host
+from imbue.minds_admin.slices.cutover_db import restamp_unmeasured_gen1_disk_gb
 from imbue.minds_admin.slices.cutover_db import rollback_park_pool_host
 from imbue.minds_admin.slices.cutover_db import rollback_restore_artifact
 from imbue.minds_admin.slices.cutover_scripts import LATCHKEY_DISK_REPLAY_TAR_PATH
@@ -94,6 +95,7 @@ from imbue.minds_admin.slices.cutover_scripts import build_docker_create_args
 from imbue.minds_admin.slices.cutover_scripts import build_docker_inspect_command
 from imbue.minds_admin.slices.cutover_scripts import build_gen1_datadisk_info_command
 from imbue.minds_admin.slices.cutover_scripts import build_git_describe_command
+from imbue.minds_admin.slices.cutover_scripts import build_home_layout_probe_command
 from imbue.minds_admin.slices.cutover_scripts import build_image_load_command
 from imbue.minds_admin.slices.cutover_scripts import build_image_publish_command
 from imbue.minds_admin.slices.cutover_scripts import build_latchkey_replay_tar
@@ -113,6 +115,7 @@ from imbue.minds_admin.slices.cutover_scripts import container_name_from_inspect
 from imbue.minds_admin.slices.cutover_scripts import cutover_image_object_key
 from imbue.minds_admin.slices.cutover_scripts import cutover_transplant_dir
 from imbue.minds_admin.slices.cutover_scripts import extract_template_replay_inputs
+from imbue.minds_admin.slices.cutover_scripts import home_layout_error_or_none
 from imbue.minds_admin.slices.cutover_scripts import latchkey_gateway_files_error_or_none
 from imbue.minds_admin.slices.cutover_scripts import latchkey_replay_detail
 from imbue.minds_admin.slices.cutover_scripts import latchkey_tunnel_port_error_or_none
@@ -144,6 +147,7 @@ from imbue.minds_admin.slices.cutover_types import RowVerdict
 from imbue.minds_admin.slices.cutover_types import SavedProductArtifact
 from imbue.minds_admin.slices.cutover_types import StageReport
 from imbue.minds_admin.slices.cutover_types import TemplateReplayInputs
+from imbue.minds_admin.slices.cutover_types import UNMEASURED_GEN1_DISK_GB_STAMP
 from imbue.minds_admin.slices.cutover_types import VM_LATCHKEY_DIR
 from imbue.minds_admin.slices.cutover_types import WorkspaceOutcome
 from imbue.minds_admin.slices.cutover_types import WorkspacePreflight
@@ -151,6 +155,7 @@ from imbue.minds_admin.slices.cutover_types import classify_pool_row
 from imbue.minds_admin.slices.cutover_types import classify_unplaced_gen1_row
 from imbue.minds_admin.slices.cutover_types import gen1_data_disk_size_error_or_none
 from imbue.minds_admin.slices.cutover_types import parse_version_tag
+from imbue.minds_admin.slices.cutover_types import restamped_gen1_disk_gb_or_none
 from imbue.minds_admin.slices.cutover_types import version_tag_error_or_none
 from imbue.minds_admin.slices.operator_identity import ManagementIdentityResolver
 from imbue.mngr.config.data_types import MngrConfig
@@ -638,6 +643,12 @@ def _preflight_candidate(
             describe = outer.execute_idempotent_command(
                 build_git_describe_command(container_id), timeout_seconds=_SHORT_TIMEOUT_SECONDS
             )
+            layout_text = _run_on_vm_checked(
+                outer,
+                build_home_layout_probe_command(container_id),
+                timeout=_SHORT_TIMEOUT_SECONDS,
+                label="home-layout",
+            )
             inspect_output = _run_on_vm_checked(
                 outer, build_docker_inspect_command(container_id), timeout=_SHORT_TIMEOUT_SECONDS, label="inspect"
             )
@@ -667,10 +678,17 @@ def _preflight_candidate(
         )
         disk_format, virtual_bytes = parse_qemu_img_info(info_output)
         disk_virtual_gib = virtual_bytes // 1024**3
-        disk_error = gen1_data_disk_size_error_or_none(disk_virtual_gib, row.disk_gb)
+        restamped_disk_gb = restamped_gen1_disk_gb_or_none(disk_virtual_gib, row.disk_gb)
+        if restamped_disk_gb is not None:
+            health_warnings.append(
+                f"disk_gb {row.disk_gb} is migration 039's unmeasured stamp; the migrate restamps it to "
+                f"{restamped_disk_gb} from the {disk_virtual_gib} GiB data disk"
+            )
+        else:
+            disk_error = gen1_data_disk_size_error_or_none(disk_virtual_gib, row.disk_gb)
     except (CutoverError, ProcessTimeoutError) as exc:
         disk_error = str(exc)
-    error = version_error or disk_error
+    error = version_error or disk_error or home_layout_error_or_none(layout_text, row.host_id)
     return base.model_copy_update(
         to_update(base.field_ref().version_tag, describe_text if version is not None else None),
         to_update(base.field_ref().is_version_ok, is_version_ok),
@@ -884,6 +902,9 @@ def _harvest_workspace(
         describe_text = _run_on_vm_checked(
             outer, build_git_describe_command(container_id), timeout=_SHORT_TIMEOUT_SECONDS, label="git-describe"
         ).strip()
+        layout_text = _run_on_vm_checked(
+            outer, build_home_layout_probe_command(container_id), timeout=_SHORT_TIMEOUT_SECONDS, label="home-layout"
+        )
         latchkey_state = parse_latchkey_harvest_output(
             _run_on_vm_checked(
                 outer,
@@ -909,6 +930,9 @@ def _harvest_workspace(
     version_error = version_tag_error_or_none(describe_text)
     if version_error is not None:
         raise CutoverError(version_error)
+    layout_error = home_layout_error_or_none(layout_text, row.host_id)
+    if layout_error is not None:
+        raise CutoverError(layout_error)
     for latchkey_error in (
         latchkey_tunnel_port_error_or_none(latchkey_state, inspect_entry),
         latchkey_gateway_files_error_or_none(latchkey_state),
@@ -930,7 +954,28 @@ def _harvest_workspace(
         label=f"qemu-img-info:{row.slice_disk_name}",
     )
     disk_format, virtual_bytes = parse_qemu_img_info(info_output)
-    disk_size_error = gen1_data_disk_size_error_or_none(virtual_bytes // 1024**3, row.disk_gb)
+    disk_virtual_gib = virtual_bytes // 1024**3
+    # A row 039 could not measure (stopped on no box then) carries the default
+    # stamp; the workspace runs now, so the measurement corrects the row before
+    # the transplant is sized from it.
+    migrated_disk_gb = row.disk_gb
+    restamped_disk_gb = restamped_gen1_disk_gb_or_none(disk_virtual_gib, row.disk_gb)
+    if restamped_disk_gb is not None:
+        with _pool_connection(ctx) as conn:
+            is_restamped = restamp_unmeasured_gen1_disk_gb(
+                conn, row.id, unmeasured_disk_gb=UNMEASURED_GEN1_DISK_GB_STAMP, disk_gb=restamped_disk_gb
+            )
+        if not is_restamped:
+            raise CutoverError(f"could not restamp the unmeasured disk_gb of row {row.id} (it changed underneath)")
+        logger.warning(
+            "Restamped row {} disk_gb {} -> {} from its measured {} GiB gen-1 data disk (migration 039 could not measure it)",
+            row.id,
+            row.disk_gb,
+            restamped_disk_gb,
+            disk_virtual_gib,
+        )
+        migrated_disk_gb = restamped_disk_gb
+    disk_size_error = gen1_data_disk_size_error_or_none(disk_virtual_gib, migrated_disk_gb)
     if disk_size_error is not None:
         raise CutoverError(disk_size_error)
     state = CutoverWorkspaceState(
@@ -948,9 +993,9 @@ def _harvest_workspace(
         slice_instance_name=row.slice_instance_name,
         slice_disk_name=row.slice_disk_name,
         version_tag=describe_text,
-        gen1_data_disk_virtual_gib=virtual_bytes // 1024**3,
+        gen1_data_disk_virtual_gib=disk_virtual_gib,
         gen1_data_disk_format=disk_format,
-        migrated_data_disk_gib=row.disk_gb,
+        migrated_data_disk_gib=migrated_disk_gb,
         memory_units=DEFAULT_MACHINE_UNITS,
         latchkey_replay_plan=latchkey_state.replay_plan,
         stage=CutoverStage.HARVESTED,
@@ -2279,6 +2324,11 @@ def _migrate_workspace(
             state = state.model_copy_update(to_update(state.field_ref().is_origin_vm_kept, is_keep_origin_vm))
             ctx.state.write_workspace(state)
         fresh = _fetch_row_or_raise(ctx, row.id)
+        # The version's release image is seeded before the workspace is stopped:
+        # a version whose image cannot be built (a template the operator's mngr
+        # cannot bake) then fails here, with the workspace still running for its
+        # owner, rather than after the stop with the row parked.
+        replay_inputs = _replay_inputs_for_version(ctx, target_server, state.version_tag, replay_inputs_cache)
         # A row leased on gen-1 with an artifact already saved means the owner
         # restarted the workspace after an earlier run's stop: the saved copy
         # is stale, so the stop half re-runs and re-saves over it -- the
@@ -2316,7 +2366,6 @@ def _migrate_workspace(
             ctx.state.write_workspace(state)
         parked_row = _require_parked_row_or_none_when_done(ctx, state)
         if parked_row is not None:
-            replay_inputs = _replay_inputs_for_version(ctx, target_server, state.version_tag, replay_inputs_cache)
             state = _restore_workspace_on_target(ctx, target_server, state, replay_inputs)
         if not state.is_origin_vm_kept:
             try:
@@ -2388,9 +2437,48 @@ def _resolve_user_id_prefix(ctx: CutoverContext, email: str) -> str:
     return str(account.user_id).replace("-", "")[:16]
 
 
+class ParkedSweepRows(FrozenModel):
+    """The in-flight records a ``--source-server-id`` sweep must not lose sight of, split by where they are headed."""
+
+    resumable_row_ids: tuple[str, ...] = Field(
+        description="Rows parked off the swept box mid-migration onto this invocation's target: re-selected"
+    )
+    retargeted_row_ids_by_target: dict[str, tuple[str, ...]] = Field(
+        description="Rows parked off the swept box mid-migration onto another target, by that target box"
+    )
+
+
+@pure
+def parked_sweep_rows(
+    states: Sequence[CutoverWorkspaceState], *, source_server_id: str, target_server_id: str
+) -> ParkedSweepRows:
+    """Which in-flight records a sweep of ``source_server_id`` onto ``target_server_id`` re-selects.
+
+    The park step clears a row's box link, so a migration that fails after
+    it leaves a row the box's row listing no longer contains; the record's
+    ``origin_server_id`` is what still ties it to the swept box. A record
+    mid-migration onto a different target is another invocation's work (or
+    a retarget the migrate would refuse), so it is reported, not selected.
+    """
+    resumable: list[str] = []
+    retargeted_by_target: dict[str, list[str]] = {}
+    for state in sorted(states, key=lambda recorded: recorded.host_db_id):
+        if not _is_migration_state_in_flight(state) or state.origin_server_id != source_server_id:
+            continue
+        if state.target_server_id == target_server_id:
+            resumable.append(state.host_db_id)
+        else:
+            retargeted_by_target.setdefault(state.target_server_id, []).append(state.host_db_id)
+    return ParkedSweepRows(
+        resumable_row_ids=tuple(resumable),
+        retargeted_row_ids_by_target={target: tuple(ids) for target, ids in retargeted_by_target.items()},
+    )
+
+
 def resolve_migration_rows(
     ctx: CutoverContext,
     *,
+    target_server_id: str,
     workspace_ids: Sequence[str],
     user_email: str | None,
     source_server_id: str | None,
@@ -2400,9 +2488,20 @@ def resolve_migration_rows(
     An explicitly named ``--workspace`` id must exist (a missing one is an
     error); ``--user`` and ``--source-server-id`` sweep whatever gen-1 rows
     they find, reporting the unmigratable ones (unleased rows to destroy,
-    rows wedged mid-transition) instead of silently skipping them.
+    rows wedged mid-transition) instead of silently skipping them. A box
+    sweep also re-selects the rows an earlier run parked off that box onto
+    this target (their box link is gone, so the box's row listing misses
+    them; see ``parked_sweep_rows``), which is what lets "re-run the same
+    invocation" resume a sweep that failed after a park.
     """
     user_prefix = _resolve_user_id_prefix(ctx, user_email) if user_email is not None else None
+    parked = (
+        parked_sweep_rows(
+            ctx.state.list_workspaces(), source_server_id=source_server_id, target_server_id=target_server_id
+        )
+        if source_server_id is not None
+        else None
+    )
     rows_by_id: dict[str, CutoverPoolRow] = {}
     with _pool_connection(ctx) as conn:
         for workspace_id in workspace_ids:
@@ -2416,6 +2515,27 @@ def resolve_migration_rows(
         if source_server_id is not None:
             for row in fetch_pool_rows_on_server(conn, BareMetalServerDbId(source_server_id)):
                 rows_by_id.setdefault(row.id, row)
+        if parked is not None:
+            for row_id in parked.resumable_row_ids:
+                parked_row = fetch_pool_row(conn, row_id)
+                if parked_row is None:
+                    logger.warning(
+                        "In-flight migration record {} (parked off box {}) has no pool row any more; skipping it",
+                        row_id,
+                        source_server_id,
+                    )
+                    continue
+                rows_by_id.setdefault(parked_row.id, parked_row)
+    if parked is not None:
+        for other_target, row_ids in parked.retargeted_row_ids_by_target.items():
+            logger.warning(
+                "Rows {} were parked off box {} mid-migration onto box {}, not this target; finish them there "
+                "(re-run with --target-server-id {}) or roll them back",
+                ", ".join(row_ids),
+                source_server_id,
+                other_target,
+                other_target,
+            )
     migrated_row_ids: set[str] = set()
     for row in rows_by_id.values():
         if row.box_generation >= FIRST_QEMU_BOX_GENERATION:
@@ -2503,6 +2623,24 @@ def require_connector_stop_kinds(client: ImbueCloudConnectorClient, admin_key: S
     )
 
 
+@pure
+def _dry_run_migration_detail(
+    row: CutoverPoolRow, recorded: CutoverWorkspaceState | None, target_server_id: str
+) -> str:
+    """What a dry run says one selected row would go through: a fresh migration, or the resume of a parked one."""
+    if _is_migration_state_in_flight(recorded):
+        assert recorded is not None
+        return (
+            f"would resume the migration onto box {target_server_id} from its {recorded.stage} record "
+            f"({row.status} row parked off box {recorded.origin_server_id})"
+        )
+    return (
+        f"would harvest (keys, inspect, version, latchkey state), product-stop, park, transplant onto "
+        f"box {target_server_id} at fresh ports, replay (container, latchkey gateway), re-lease "
+        f"({row.status} row{'; admin-start first' if row.status != 'leased' else ''})"
+    )
+
+
 def run_migrate(
     ctx: CutoverContext,
     *,
@@ -2529,7 +2667,11 @@ def run_migrate(
         raise CutoverError(f"--target-server-id {target_server_id}: {target_refusal}")
     assert target_server is not None
     candidates, unmigratable = resolve_migration_rows(
-        ctx, workspace_ids=workspace_ids, user_email=user_email, source_server_id=source_server_id
+        ctx,
+        target_server_id=target_server_id,
+        workspace_ids=workspace_ids,
+        user_email=user_email,
+        source_server_id=source_server_id,
     )
     if not candidates and not unmigratable:
         raise CutoverError("the --workspace/--user/--source-server-id selectors matched no pool rows")
@@ -2539,11 +2681,7 @@ def run_migrate(
                 host_db_id=row.id,
                 host_id=row.host_id,
                 stage=CutoverStage.RESTORED,
-                detail=(
-                    f"would harvest (keys, inspect, version, latchkey state), product-stop, park, transplant onto "
-                    f"box {target_server_id} at fresh ports, replay (container, latchkey gateway), re-lease "
-                    f"({row.status} row{'; admin-start first' if row.status != 'leased' else ''})"
-                ),
+                detail=_dry_run_migration_detail(row, ctx.state.read_workspace(row.id), target_server_id),
             )
             for row in candidates
         ]

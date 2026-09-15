@@ -537,3 +537,25 @@ def gen1_data_disk_size_error_or_none(data_disk_virtual_gib: int, row_disk_gb: i
     if data_disk_virtual_gib == row_disk_gb - DATA_DISK_BASE_GIB:
         return None
     return f"data disk virtual size {data_disk_virtual_gib} GiB != row disk_gb {row_disk_gb} - {DATA_DISK_BASE_GIB}"
+
+
+# The ``disk_gb`` migration 039 stamped on a gen-1 row it could not measure (a
+# workspace stopped on no box at the time): the default carve size, not the
+# row's own disk plus the base.
+UNMEASURED_GEN1_DISK_GB_STAMP: Final[int] = 44
+
+
+@pure
+def restamped_gen1_disk_gb_or_none(data_disk_virtual_gib: int, row_disk_gb: int) -> int | None:
+    """The ``disk_gb`` a gen-1 row should carry once its data disk is measured, or None when the stamp stands.
+
+    Only a row still on 039's unmeasured fallback is restamped, and only when
+    the measurement disagrees with it; any other mismatch stays a refusal
+    (``gen1_data_disk_size_error_or_none``), since a measured stamp that has
+    drifted is something to understand, not paper over.
+    """
+    if row_disk_gb != UNMEASURED_GEN1_DISK_GB_STAMP:
+        return None
+    if gen1_data_disk_size_error_or_none(data_disk_virtual_gib, row_disk_gb) is None:
+        return None
+    return data_disk_virtual_gib + DATA_DISK_BASE_GIB

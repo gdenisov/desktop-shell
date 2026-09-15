@@ -42,6 +42,7 @@ from imbue.minds_admin.cli.cutover_drivers import build_saved_product_artifact
 from imbue.minds_admin.cli.cutover_drivers import is_artifact_resave_due
 from imbue.minds_admin.cli.cutover_drivers import is_parked_row_shape
 from imbue.minds_admin.cli.cutover_drivers import minimal_mngr_context
+from imbue.minds_admin.cli.cutover_drivers import parked_sweep_rows
 from imbue.minds_admin.cli.cutover_drivers import partition_migration_rows
 from imbue.minds_admin.cli.cutover_drivers import probe_workspace_health
 from imbue.minds_admin.cli.cutover_drivers import render_preflight_table
@@ -705,6 +706,43 @@ def test_partition_migration_rows_splits_candidates_from_unmigratable_rows() -> 
     foreign = outcomes_by_id[foreign_gen2.id]
     assert foreign.stage == CutoverStage.FAILED
     assert foreign.detail is not None and "already on gen-2" in foreign.detail
+
+
+def test_box_sweep_reselects_the_rows_it_parked_onto_the_same_target(tmp_path: Path) -> None:
+    # The park step clears a row's box link, so a --source-server-id sweep's row
+    # listing no longer contains a row an earlier run parked; the state record's
+    # origin is what still ties it to the swept box. Only records headed for
+    # this invocation's target are re-selected: one onto another target is
+    # another invocation's work (reported), and terminal records are ordinary
+    # gen-1 rows again (found by the listing, or gone).
+    state_store = CutoverStateStore(root=tmp_path / "cutover")
+    state_store.ensure_layout()
+    source, target, other_target, other_source = (str(uuid4()) for _ in range(4))
+    parked_here = make_cutover_workspace_state(str(uuid4()), source, target_server_id=target)
+    parked_here_failed = make_cutover_workspace_state(str(uuid4()), source, target_server_id=target)
+    parked_elsewhere = make_cutover_workspace_state(str(uuid4()), source, target_server_id=other_target)
+    parked_off_another_box = make_cutover_workspace_state(str(uuid4()), other_source, target_server_id=target)
+    finished = make_cutover_workspace_state(str(uuid4()), source, target_server_id=target)
+    rolled_back = make_cutover_workspace_state(str(uuid4()), source, target_server_id=target)
+    for state, stage in (
+        (parked_here, CutoverStage.PARKED),
+        (parked_here_failed, CutoverStage.FAILED),
+        (parked_elsewhere, CutoverStage.STOPPED),
+        (parked_off_another_box, CutoverStage.PARKED),
+        (finished, CutoverStage.RESTORED),
+        (rolled_back, CutoverStage.ROLLED_BACK),
+    ):
+        state_store.write_workspace(state.model_copy_update(to_update(state.field_ref().stage, stage)))
+
+    parked = parked_sweep_rows(state_store.list_workspaces(), source_server_id=source, target_server_id=target)
+
+    assert set(parked.resumable_row_ids) == {parked_here.host_db_id, parked_here_failed.host_db_id}
+    assert parked.retargeted_row_ids_by_target == {other_target: (parked_elsewhere.host_db_id,)}
+    # A sweep of a box nothing was parked off selects nothing extra.
+    untouched = parked_sweep_rows(
+        state_store.list_workspaces(), source_server_id=str(uuid4()), target_server_id=target
+    )
+    assert untouched.resumable_row_ids == () and untouched.retargeted_row_ids_by_target == {}
 
 
 def test_failed_remigration_leaves_a_terminal_record_untouched(tmp_path: Path) -> None:

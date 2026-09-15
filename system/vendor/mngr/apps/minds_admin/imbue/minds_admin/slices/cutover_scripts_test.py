@@ -27,6 +27,7 @@ from imbue.minds_admin.slices.cutover_scripts import build_disk_materialize_comm
 from imbue.minds_admin.slices.cutover_scripts import build_docker_create_args
 from imbue.minds_admin.slices.cutover_scripts import build_gen1_datadisk_info_command
 from imbue.minds_admin.slices.cutover_scripts import build_git_describe_command
+from imbue.minds_admin.slices.cutover_scripts import build_home_layout_probe_command
 from imbue.minds_admin.slices.cutover_scripts import build_image_load_command
 from imbue.minds_admin.slices.cutover_scripts import build_image_publish_command
 from imbue.minds_admin.slices.cutover_scripts import build_latchkey_replay_tar
@@ -40,6 +41,7 @@ from imbue.minds_admin.slices.cutover_scripts import build_vm_gateway_port_probe
 from imbue.minds_admin.slices.cutover_scripts import build_vm_key_harvest_command
 from imbue.minds_admin.slices.cutover_scripts import build_vm_latchkey_harvest_command
 from imbue.minds_admin.slices.cutover_scripts import build_vm_latchkey_supervisor_status_command
+from imbue.minds_admin.slices.cutover_scripts import build_workspace_version_probe_script
 from imbue.minds_admin.slices.cutover_scripts import container_name_from_inspect
 from imbue.minds_admin.slices.cutover_scripts import container_ssh_host_port_from_inspect
 from imbue.minds_admin.slices.cutover_scripts import cutover_image_object_key
@@ -47,6 +49,7 @@ from imbue.minds_admin.slices.cutover_scripts import cutover_transplant_dir
 from imbue.minds_admin.slices.cutover_scripts import extract_autostart_installer_commands
 from imbue.minds_admin.slices.cutover_scripts import extract_slice_volume_home_path
 from imbue.minds_admin.slices.cutover_scripts import extract_template_replay_inputs
+from imbue.minds_admin.slices.cutover_scripts import home_layout_error_or_none
 from imbue.minds_admin.slices.cutover_scripts import latchkey_gateway_files_error_or_none
 from imbue.minds_admin.slices.cutover_scripts import latchkey_replay_detail
 from imbue.minds_admin.slices.cutover_scripts import latchkey_tunnel_port_error_or_none
@@ -316,6 +319,7 @@ def test_probe_commands_address_the_container_by_label_and_workspace_checkout() 
     assert_valid_bash(describe)
     assert "safe.directory=/home/user/workspace" in describe
     assert "describe --tags --match" in describe and "minds-v*" in describe
+    assert "/home/user/workspace/system/vendor/mngr/apps/minds/imbue/minds/build_info.py" in describe
     info = build_gen1_datadisk_info_command(f"{_INSTANCE}-data")
     assert_valid_bash(info)
     assert info == f'qemu-img info -U --output=json "$HOME"/.lima/_disks/{_INSTANCE}-data/datadisk'
@@ -776,3 +780,73 @@ def test_latchkey_replay_detail_names_each_plan() -> None:
     assert latchkey_replay_detail(LatchkeyReplayPlan.FULL) == snapshot(
         "latchkey state replayed and the gateway restarted"
     )
+
+
+def _init_workspace_checkout(checkout: Path, vendored_pin: str | None) -> None:
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+        check=True,
+    )
+    if vendored_pin is not None:
+        build_info = checkout / "system/vendor/mngr/apps/minds/imbue/minds/build_info.py"
+        build_info.parent.mkdir(parents=True)
+        build_info.write_text(f'from typing import Final\n\nFALLBACK_BRANCH: Final[str] = "{vendored_pin}"\n')
+
+
+def _run_version_probe(checkout: Path) -> str:
+    return subprocess.run(
+        ["sh", "-c", build_workspace_version_probe_script(str(checkout))], capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_version_probe_prefers_the_nearest_release_tag(tmp_path: Path) -> None:
+    checkout = tmp_path / "workspace"
+    _init_workspace_checkout(checkout, vendored_pin="minds-v0.5.0")
+    subprocess.run(["git", "-C", str(checkout), "tag", "minds-v0.5.2"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "tag", "v9.9.9"], check=True)
+
+    assert _run_version_probe(checkout) == "minds-v0.5.2"
+
+
+def test_version_probe_falls_back_to_the_vendored_pin_when_the_checkout_has_no_release_tag(tmp_path: Path) -> None:
+    checkout = tmp_path / "workspace"
+    _init_workspace_checkout(checkout, vendored_pin="minds-v0.5.0")
+
+    assert _run_version_probe(checkout) == "minds-v0.5.0"
+
+
+def test_version_probe_prints_nothing_when_neither_a_tag_nor_a_vendored_pin_exists(tmp_path: Path) -> None:
+    checkout = tmp_path / "workspace"
+    _init_workspace_checkout(checkout, vendored_pin=None)
+
+    assert _run_version_probe(checkout) == ""
+
+
+def test_home_layout_probe_command_classifies_the_container_home() -> None:
+    command = build_home_layout_probe_command("abc123")
+    assert_valid_bash(command)
+    assert command.startswith("docker exec --workdir / abc123 sh -c ")
+    assert "-L /home/user ]" in command and "-L /home/user/.mngr ]" in command
+
+
+def test_home_layout_error_accepts_only_the_home_layout() -> None:
+    assert home_layout_error_or_none("home\n", "host-abc") is None
+    legacy = home_layout_error_or_none("legacy\n", "host-abc")
+    assert legacy is not None and "writable layer" in legacy
+    assert "repair-home-layout --host-id host-abc --migrate" in legacy
+    unknown = home_layout_error_or_none("", "host-abc")
+    assert unknown is not None and "unrecognized home layout" in unknown

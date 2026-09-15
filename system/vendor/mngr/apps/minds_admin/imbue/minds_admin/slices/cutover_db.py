@@ -51,6 +51,13 @@ _PARK_POOL_HOST_SQL: Final[str] = (
 # recorded values can be stale (a client-side adopt rotates the on-disk keys
 # without updating the row) -- record-sync clients pin the row's values for
 # the new address, so serving the old ones would hard-reject their SSH.
+# Correct a gen-1 row's ``disk_gb`` from 039's unmeasured fallback to its
+# measured data disk plus the base (see ``restamped_gen1_disk_gb_or_none``); the
+# WHERE pins the fallback value so a concurrent change is never overwritten.
+_RESTAMP_UNMEASURED_GEN1_DISK_GB_SQL: Final[str] = (
+    "UPDATE pool_hosts SET disk_gb = %s WHERE id = %s AND disk_gb = %s AND box_generation < 2 AND status = 'leased'"
+)
+
 _FINISH_RESTORE_POOL_HOST_SQL: Final[str] = (
     "UPDATE pool_hosts SET status = 'leased', vps_address = %s, ssh_port = %s, container_ssh_port = %s, "
     "bare_metal_server_id = %s, box_generation = %s, memory_units = %s, "
@@ -211,6 +218,15 @@ def park_pool_host(conn: Any, row_id: str) -> bool:
         is_parked = cur.rowcount == 1
     conn.commit()
     return is_parked
+
+
+def restamp_unmeasured_gen1_disk_gb(conn: Any, row_id: str, *, unmeasured_disk_gb: int, disk_gb: int) -> bool:
+    """Replace a leased gen-1 row's unmeasured ``disk_gb`` stamp with ``disk_gb``; True when this call changed it."""
+    with conn.cursor() as cur:
+        cur.execute(_RESTAMP_UNMEASURED_GEN1_DISK_GB_SQL, (disk_gb, row_id, unmeasured_disk_gb))
+        is_restamped = cur.rowcount == 1
+    conn.commit()
+    return is_restamped
 
 
 def rollback_park_pool_host(conn: Any, row_id: str, *, memory_units: int) -> bool:

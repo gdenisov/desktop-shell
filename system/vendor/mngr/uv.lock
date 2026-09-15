@@ -58,6 +58,7 @@ members = [
     "imbue-mngr-vps",
     "imbue-mngr-vultr",
     "imbue-mngr-wait",
+    "imbue-mngr-witness",
     "imbue-observability",
     "minds",
     "modal-app-kit",
@@ -3347,6 +3348,37 @@ dependencies = [
 requires-dist = [
     { name = "click-option-group", specifier = ">=0.5.6" },
     { name = "imbue-mngr", editable = "libs/mngr" },
+]
+
+[[package]]
+name = "imbue-mngr-witness"
+version = "0.1.0"
+source = { editable = "libs/mngr_witness" }
+dependencies = [
+    { name = "click" },
+    { name = "concurrency-group" },
+    { name = "imbue-common" },
+    { name = "imbue-mngr" },
+    { name = "imbue-mngr-behaviors" },
+    { name = "imbue-mngr-claude" },
+    { name = "imbue-mngr-mapreduce" },
+    { name = "jinja2" },
+    { name = "loguru" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "click" },
+    { name = "concurrency-group", editable = "libs/concurrency_group" },
+    { name = "imbue-common", editable = "libs/imbue_common" },
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "imbue-mngr-behaviors", editable = "libs/mngr_behaviors" },
+    { name = "imbue-mngr-claude", editable = "libs/mngr_claude" },
+    { name = "imbue-mngr-mapreduce", editable = "libs/mngr_mapreduce" },
+    { name = "jinja2", specifier = ">=3.1" },
+    { name = "loguru" },
+    { name = "pydantic", specifier = ">=2.0" },
 ]
 
 [[package]]

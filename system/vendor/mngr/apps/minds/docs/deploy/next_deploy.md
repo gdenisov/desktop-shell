@@ -162,9 +162,14 @@ deploy was deliberately not done.
   channel and check the connector log for `Could not read the web pin`
   (a feed read problem) or `No web pin published` (a channel file missing).
   Also check the three Modal web functions (`rsc-production` `api`,
-  `llm-production` `proxy`, `oauth-redirector-production` `redirect`) show a
-  `us` region in `modal app describe`, and that a lease/stop cycle against a
-  gen-2 box still works through the proxy.
+  `llm-production` `proxy`, `oauth-redirector-production` `redirect`) run in
+  a US region: `modal container list` (with `MODAL_PROFILE=minds-production
+  MODAL_ENVIRONMENT=main`) names the live containers, and `modal container
+  exec <id> -- sh -c 'echo $MODAL_REGION'` must print a `us-*` region (the
+  Modal CLI has no `app describe`). Then confirm a lease/stop cycle against a
+  gen-2 box still works through the proxy. Verified on staging on 2026-09-15
+  (`us-west-2` for both the connector and the proxy after deploy
+  `20260915T021647Z`).
 
 - [ ] **Promote 0.5.0 past alpha.** Beta and stable are still 0.4.2 (build
   `260825un55i8ix7`), so most users are two releases behind. The 0.5.0 build is
@@ -203,7 +208,10 @@ deploy was deliberately not done.
   Virginia/Oregon and Neon in `us-west-2`, so every proxied SSH and every DB
   round trip currently crosses the Atlantic and back through the WireGuard
   tunnel. Thread `region="us"` (broad; ~1.15x) through `deploy.toml` for the
-  connector, LiteLLM proxy and analytics apps, then redeploy each tier.
+  connector, LiteLLM proxy and analytics apps, then redeploy each tier. The
+  pin landed in `dcf4b7075c` on the web functions (crons stay unpinned);
+  staging's deploy `20260915T021647Z` verified `us-west-2` for both the
+  connector and the proxy containers. Production gets it with its next deploy.
 
 ## Should land soon
 
@@ -246,10 +254,11 @@ deploy was deliberately not done.
   the dev-josh-2 rows baked from the deleted provisional tags were destroyed
   and the dev pool re-baked from the real tag. `minds-v0.6.1` was cut and
   built on 2026-09-15 (mngr `0c9d81e7f6`, dwt `a87c68e19`, build
-  `260915wjcyd06bp`; see [history/minds-v0.6.1.md](./history/minds-v0.6.1.md))
-  but not baked, deployed or promoted anywhere yet. Still to do: rehearse
-  0.6.1 on staging, cut further 0.6.x releases for the gen-2 cohort and
-  keep 0.5.x stocked on gen-1 until its create rate reads ~zero.
+  `260915wjcyd06bp`; see [history/minds-v0.6.1.md](./history/minds-v0.6.1.md)),
+  deployed to staging and baked on all three staging boxes (one 0.6.1 row
+  each) on 2026-09-15; staging holds no gen-1 box or row any more. Still to
+  do: cut further 0.6.x releases for the gen-2 cohort and keep 0.5.x stocked
+  on production's gen-1 boxes until its create rate reads ~zero.
 - [ ] **Production has no gen-2 box yet**, and the bake guard refuses
   `minds-v0.6.0` on gen-1 boxes, so it cannot hold 0.6.0 rows until its gen-2
   prerequisites land: the tier's `[ssh_ca]` committed (and dropped from the
@@ -272,8 +281,12 @@ deploy was deliberately not done.
   single alpha workspaces). Staging: the full stack (latchkey leg, stop kinds,
   the #970 supervisor fix) passed its drills on 2026-09-14 with both a real
   0.5.2 client and a branch client open (see
-  [history/minds-v0.6.0.md](./history/minds-v0.6.0.md)); the rest of staging's
-  gen-1 workspaces and the vin box remain.
+  [history/minds-v0.6.0.md](./history/minds-v0.6.0.md)). Staging is DONE as
+  of 2026-09-15: every remaining workspace migrated, both gen-1 boxes repaved
+  gen-2 (see [history/minds-v0.6.1.md](./history/minds-v0.6.1.md), whose
+  findings list what the sweep taught the tooling: legacy-layout workspaces
+  need `repair-home-layout` first, rows 039 could not measure are restamped,
+  pre-0.5.0 templates need the tolerant seed bake). Production remains.
 - [ ] `CLEANUP: drop the lima_service_user / lima_instance_name /
   lima_disk_name columns (a follow-up connector migration) and the dual writes
   and COALESCE reads marked CLEANUP in minds_admin and the connector once
