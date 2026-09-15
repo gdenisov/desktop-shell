@@ -3036,10 +3036,14 @@ version = "0.1.0"
 source = { editable = "libs/mngr_mapreduce" }
 dependencies = [
     { name = "imbue-mngr" },
+    { name = "jinja2" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "imbue-mngr", editable = "libs/mngr" }]
+requires-dist = [
+    { name = "imbue-mngr", editable = "libs/mngr" },
+    { name = "jinja2", specifier = ">=3.1" },
+]
 
 [[package]]
 name = "imbue-mngr-modal"
