@@ -11,10 +11,13 @@ reason vocabulary lives here for the same reason: the script writes it and the d
 it, and the two must not be able to drift.
 """
 
+import re
 from enum import auto
+from typing import Self
 
 from pydantic import Field
 from pydantic import ValidationError
+from pydantic import model_validator
 
 from imbue.imbue_common.enums import LowerCaseStrEnum
 from imbue.imbue_common.frozen_model import FrozenModel
@@ -28,6 +31,10 @@ REASON_TUNNEL_DOWN = "tunnel_down"
 # The page did not offer what the flow asked for in the time allowed -- a locator that never
 # resolved, a navigation that never settled. The browser is fine, so this one is the app's.
 REASON_ACTION_TIMED_OUT = "action_timed_out"
+# A ref the agent read off one snapshot no longer names the same thing on a fresh one: the element
+# is gone, or the page changed and the number sits on another role. The browser and the page are
+# fine; the agent has to address the element again from the state it is now shown.
+REASON_STALE_REF = "stale_ref"
 # An action kind the script cannot perform. The driver decides the vocabulary, so this is the
 # harness contradicting itself and nothing to do with the app.
 REASON_UNKNOWN_ACTION = "unknown_action"
@@ -110,18 +117,42 @@ QUIET_MS = 250
 SETTLE_CAP_MS = 5_000
 
 
+# The shape of a snapshot ref: what Playwright's "ai" rendering prints as `[ref=e9]`.
+REF_PATTERN = re.compile(r"^e\d+$")
+
+
+class StepActionError(ValueError):
+    """An action whose own fields contradict each other, so no page could satisfy it.
+
+    A ValueError, because that is what pydantic folds into the ValidationError both sides read the
+    boundary's verdict off.
+    """
+
+
 class StepAction(FrozenModel):
     """One decided browser action.
 
     Elements are addressed by ARIA role and accessible name, which is what the page snapshot is
-    expressed in and what survives the page changing underneath the agent.
+    expressed in and what survives the page changing underneath the agent. An element the snapshot
+    lists with no name is addressed by the ``ref`` the snapshot printed for it instead; the step
+    resolves that against a fresh snapshot of the same page, so it holds only while the page has
+    not changed since the snapshot it was read from.
     """
 
     kind: StepActionKind = Field(description="Which browser operation to perform")
     role: str = Field(default="", description="The target element's ARIA role, e.g. 'button'")
     target: str = Field(default="", description="The target element's accessible name")
+    ref: str = Field(default="", description="The target element's snapshot ref, e.g. 'e9', when it has no name")
     text: str = Field(default="", description="Text to type, keys to press, or the URL to open")
     amount: int = Field(default=0, description="Scroll distance in pixels; negative scrolls up")
+
+    @model_validator(mode="after")
+    def _validate_ref_is_checkable(self) -> Self:
+        if self.ref and not REF_PATTERN.match(self.ref):
+            raise StepActionError("a ref is what the snapshot printed, such as 'e9', and nothing else")
+        if self.ref and not self.role:
+            raise StepActionError("a ref needs the role it was read on, which is what makes it checkable")
+        return self
 
 
 class StepCookie(FrozenModel):
@@ -175,6 +206,26 @@ class StepResult(FrozenModel):
     reaction: StepReaction = Field(
         default=StepReaction.UNOBSERVED, description="What the DOM did after the action, where the step watched"
     )
+
+
+# One line of that rendering: an indented dash, an optional quote (Playwright quotes a whole line
+# whose name holds characters that would break its own format), then the role.
+_SNAPSHOT_LINE_ROLE_PATTERN = re.compile(r"^\s*-\s+'?([a-z]+)")
+
+
+def snapshot_line_for_ref(snapshot: str, ref: str) -> str:
+    """The snapshot line carrying `[ref=<ref>]`, or empty when no line does."""
+    marker = "[ref={}]".format(ref)
+    for line in snapshot.splitlines():
+        if marker in line:
+            return line
+    return ""
+
+
+def snapshot_line_role(line: str) -> str:
+    """The ARIA role a snapshot line opens with, or empty for a line that is not an element."""
+    match = _SNAPSHOT_LINE_ROLE_PATTERN.match(line)
+    return match.group(1) if match else ""
 
 
 # Where a validation error about an action kind points.

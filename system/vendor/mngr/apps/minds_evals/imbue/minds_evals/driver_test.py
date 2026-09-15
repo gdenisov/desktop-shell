@@ -1353,7 +1353,7 @@ def _worker_rules(capture_output: str, listing_json: str = worker_listing_json("
         ScriptedExecRule(
             "MINDS_EVALS_SECTION:list_exit", [ok_result(mngr_exec_json(worker_listing_output(listing_json)))]
         ),
-        ScriptedExecRule("mngr transcript {}".format(WORKER_NAME), [ok_result(mngr_exec_json(capture_output))]),
+        ScriptedExecRule("mngr transcript {}".format(WORKER_AGENT_ID), [ok_result(mngr_exec_json(capture_output))]),
         *_setup_rules(),
     ]
 
@@ -1365,7 +1365,7 @@ def test_driver_embeds_a_launched_worker_under_its_launching_call(tmp_path: Path
         _one_turn_conversation(),
         trial_name="todo-app__worker1",
         timeout_seconds=1800.0,
-        rules=_worker_rules(worker_capture_output("0", "0", "", WORKER_TASK_FILE, "")),
+        rules=_worker_rules(worker_capture_output("0", "0", WORKER_TASK_FILE, "")),
         downloadable_content_by_source=worker_trial_downloads(),
     )
 
@@ -1414,7 +1414,7 @@ def test_driver_builds_a_listed_workers_trajectory_from_its_stream_as_its_own_ty
         trial_name="todo-app__worker2",
         timeout_seconds=1800.0,
         rules=_worker_rules(
-            worker_capture_output("1", "0", "", WORKER_TASK_FILE, "unusable stream"), listing_json=json.dumps(listing)
+            worker_capture_output("1", "0", WORKER_TASK_FILE, "unusable stream"), listing_json=json.dumps(listing)
         ),
         downloadable_content_by_source=worker_trial_downloads(is_document_included=False),
     )
@@ -1441,7 +1441,7 @@ def test_driver_rebuilds_an_invalid_worker_document_from_its_stream_and_keeps_th
         _one_turn_conversation(),
         trial_name="todo-app__worker3",
         timeout_seconds=1800.0,
-        rules=_worker_rules(worker_capture_output("0", "0", "", WORKER_TASK_FILE, "")),
+        rules=_worker_rules(worker_capture_output("0", "0", WORKER_TASK_FILE, "")),
         downloadable_content_by_source=downloads,
     )
 
@@ -4257,3 +4257,42 @@ def test_a_proxied_trial_confirms_its_model_against_what_the_proxy_metered(tmp_p
     assert harness_config["observed_models"] == ["claude-opus-4-8"]
     assert is_model_confirmed(_harness_config("haiku"), harness_config["observed_models"]) is False
     assert harness_config["is_model_confirmed"] is True
+
+
+def test_driver_embeds_an_unidentified_worker_built_from_its_stream(tmp_path: Path) -> None:
+    # Neither the listing nor the captured document names the worker, so no mngr agent id is in
+    # hand. Its stream still is, so the worker is embedded under a launch-derived stand-in rather
+    # than dropped from the trajectory.
+    listing = json.loads(worker_listing_json("WAITING"))
+    listing["agents"] = listing["agents"][:1]
+
+    _driver, environment, _context = _run_driver(
+        tmp_path,
+        ("Build it",),
+        _one_turn_conversation(),
+        trial_name="todo-app__worker4",
+        timeout_seconds=1800.0,
+        rules=[
+            ScriptedExecRule(
+                "MINDS_EVALS_SECTION:list_exit",
+                [ok_result(mngr_exec_json(worker_listing_output(json.dumps(listing))))],
+            ),
+            ScriptedExecRule(
+                "mngr transcript {}".format(WORKER_NAME),
+                [ok_result(mngr_exec_json(worker_capture_output("1", "0", WORKER_TASK_FILE, "no document")))],
+            ),
+            *_setup_rules(),
+        ],
+        downloadable_content_by_source=worker_trial_downloads(is_document_included=False),
+    )
+
+    worker = _box_trajectory(environment)["subagent_trajectories"][1]
+    assert worker["trajectory_id"] == "worker-{}".format(WORKER_NAME)
+    # The stand-in is only what the evidence is filed under; the block that names the worker
+    # reports that no mngr agent id was resolved.
+    assert worker["extra"]["worker"]["agent_id"] == ""
+    assert worker["extra"]["worker"]["name"] == WORKER_NAME
+    assert [step["message"] for step in worker["steps"]] == [
+        "Harden the todo app and report back.",
+        "Hardened; report pushed.",
+    ]

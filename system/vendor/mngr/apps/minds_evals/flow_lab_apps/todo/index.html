@@ -7,7 +7,10 @@
   body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 30rem; }
   ul { list-style: none; padding: 0; }
   li { display: flex; align-items: center; gap: 0.5rem; padding: 0.25rem 0; }
-  li.done label { text-decoration: line-through; }
+  /* The row's text is a label, or a span when unnamed=1 strips the association, and a completed
+     row reads as struck through either way: the knob takes away the accessible name and nothing
+     else. */
+  li.done label, li.done span { text-decoration: line-through; }
   footer { margin-top: 1rem; color: #555; font-size: 0.9rem; }
   /* arm_delete: the only acknowledgement of a first click is this highlight,
      so a reader who sees only the accessibility tree cannot tell it is armed. */
@@ -54,6 +57,9 @@ const TICKER = params.get("ticker") === "1";
 // way, so a navigation lands after the page has already been seen to react rather than instead of
 // reacting.
 const PENDING_MS = parseInt(params.get("pending") || "0", 10) || 0;
+// unnamed=1: a task's checkbox gets no label association, so it has no accessible name and the
+// tree lists it as a bare `checkbox`. The shape of an app whose author skipped accessibility.
+const UNNAMED = params.get("unnamed") === "1";
 
 const STORAGE_KEY = "todo.tasks";
 const listEl = document.getElementById("list");
@@ -150,9 +156,9 @@ function render() {
       toggleTask(index);
     });
 
-    const label = document.createElement("label");
-    label.htmlFor = checkbox.id;
-    label.textContent = task.text;
+    const taskText = document.createElement(UNNAMED ? "span" : "label");
+    if (!UNNAMED) taskText.htmlFor = checkbox.id;
+    taskText.textContent = task.text;
 
     const del = document.createElement("button");
     del.textContent = 'Delete "' + task.text + '"';
@@ -170,7 +176,7 @@ function render() {
     });
 
     row.appendChild(checkbox);
-    row.appendChild(label);
+    row.appendChild(taskText);
     row.appendChild(del);
     listEl.appendChild(row);
   });

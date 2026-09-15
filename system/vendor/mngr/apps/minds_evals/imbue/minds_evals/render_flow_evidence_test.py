@@ -212,6 +212,43 @@ def test_renderer_marks_a_step_whose_action_never_ran(tmp_path: Path) -> None:
     assert "THIS ACTION DID NOT RUN: no element 7" in digest
 
 
+def test_renderer_tells_the_judge_a_control_had_no_name_without_counting_it(tmp_path: Path) -> None:
+    verification_dir = tmp_path / "verification"
+    flow_dir = verification_dir / "flows" / "add_complete_delete"
+    flow_dir.mkdir(parents=True)
+    (flow_dir / "log.jsonl").write_text(
+        json.dumps(
+            {
+                "step_index": 3,
+                "action": "click the checkbox that has no accessible name (ref e9)",
+                "target_ref": "e9",
+                "reasoning": "the checkbox has no name",
+                "state": "- checkbox [ref=e9]",
+            }
+        )
+        + "\n"
+    )
+    _write_manifest(verification_dir, [_flow_entry("add_complete_delete", "passed")])
+
+    digest, _screenshots = _collect(tmp_path)
+
+    # The step is marked where the judge reads it, and the note says what the mark means and that
+    # it is not what this flow measures.
+    assert "step 3: click the checkbox that has no accessible name (ref e9)" in digest
+    assert "addressed by ref: the page gives this control no accessible name" in digest
+    assert "Note on unnamed controls" in digest and "on its own it is not meant to lower the score" in digest
+
+
+def test_renderer_leaves_the_unnamed_control_note_out_when_every_control_was_named(tmp_path: Path) -> None:
+    verification_dir = tmp_path / "verification"
+    _write_flow(verification_dir, "persistence", step_count=2)
+    _write_manifest(verification_dir, [_flow_entry("persistence", "passed")])
+
+    digest, _screenshots = _collect(tmp_path, [_flow_check("persistence")])
+
+    assert "unnamed controls" not in digest and "addressed by ref" not in digest
+
+
 def test_renderer_still_produces_both_inputs_when_the_evidence_is_unreadable(tmp_path: Path) -> None:
     # The pre-step runs under `set -e` before rewardkit, so raising costs the trial its entire
     # reward -- gates and quality included -- over a flattening step.

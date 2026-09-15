@@ -47,6 +47,7 @@ from imbue.minds_evals import minds_bridge
 from imbue.minds_evals import model_calls
 from imbue.minds_evals.forward_instance import SESSION_COOKIE_NAME
 from imbue.minds_evals.resources import flow_step_protocol
+from imbue.minds_evals.resources.flow_step_protocol import REF_PATTERN
 from imbue.minds_evals.resources.flow_step_protocol import StepAction
 from imbue.minds_evals.resources.flow_step_protocol import StepActionKind
 from imbue.minds_evals.resources.flow_step_protocol import StepCookie
@@ -85,6 +86,9 @@ TAIL_STATE_PROMPT_CHARS: Final[int] = 5_000
 
 _ACTION_TOOL_NAME: Final[str] = "next_browser_action"
 _READING_TOOL_NAME: Final[str] = "flow_reading"
+
+# What the flow log records as the action of a decision that could not be acted on.
+UNUSABLE_ACTION: Final[str] = "(no usable action)"
 
 
 class FlowRecordKind(LowerCaseStrEnum):
@@ -128,12 +132,16 @@ class FlowAction(FrozenModel):
     Elements are addressed by ACCESSIBLE ROLE AND NAME rather than by an index into a listing.
     That is what the page snapshot itself is expressed in, and it survives the page changing
     underneath the agent -- an index does not, which is why an index-addressed executor has to re-read the
-    page before every single action just to keep its numbering valid.
+    page before every single action just to keep its numbering valid. The one exception is an
+    element the snapshot lists with no name at all, which has nothing but its snapshot ref to be
+    addressed by; the step script re-reads the page before acting on one, and the record says the
+    element was nameless, because a control without an accessible name is a defect of the app.
     """
 
     kind: FlowActionKind = Field(description="Which browser operation to perform")
     role: str = Field(description="The target element's ARIA role, e.g. 'button' or 'textbox'")
-    target: str = Field(description="The target element's accessible name")
+    target: str = Field(description="The target element's accessible name; empty when addressed by ref")
+    ref: str = Field(description="The target element's snapshot ref, only for an element with no name")
     text: str = Field(description="Text to type, keys to press, or the URL to open")
     amount: int = Field(description="Scroll distance in pixels (negative scrolls up)")
     reasoning: str = Field(description="Why the agent chose this action, recorded in the flow log")
@@ -206,6 +214,13 @@ _ACTION_TOOL: Final[ToolParam] = {
                 "type": "string",
                 "description": "The target element's accessible name, exactly as the page snapshot spells it.",
             },
+            "ref": {
+                "type": "string",
+                "description": (
+                    "The target element's ref from the page snapshot, e.g. 'e9', ONLY for an element the "
+                    "snapshot lists with no name at all. Give the role with it and leave target empty."
+                ),
+            },
             "text": {"type": "string", "description": "Text to type, keys to press, or the URL to open."},
             "amount": {"type": "integer", "description": "Scroll distance in pixels; negative scrolls up."},
         },
@@ -239,7 +254,10 @@ _SYSTEM_PROMPT: Final[str] = (
     "title and its accessibility tree. Choose the SINGLE next action.\n\n"
     "Rules:\n"
     "- Address an element by the ARIA role and accessible name the current page state gives it, spelled "
-    "exactly as the tree spells them. Never invent a name the page does not show.\n"
+    "exactly as the tree spells them. Never invent a name the page does not show. An element the tree "
+    "lists with no name at all (e.g. `- checkbox [ref=e9]`) is addressed by its ref instead: give the "
+    "role and the ref, and leave target empty. Use a ref for nothing else -- a control with no name is "
+    "recorded as such.\n"
     "- Do exactly what the declared actions say. Do not improve the app, work around bugs, or try alternative "
     "routes to make a broken app look like it works -- the point is to find out whether it works.\n"
     "- If the app is broken, unresponsive, or missing what the declared actions need, choose 'done' and say so in "
@@ -390,9 +408,9 @@ def describe_action(action: FlowAction) -> str:
     """A one-line record of an action, for the flow log and the next prompt's history."""
     match action.kind:
         case FlowActionKind.CLICK:
-            return "click the {} named {!r}".format(action.role, action.target)
+            return "click the {}".format(_describe_target(action))
         case FlowActionKind.INPUT:
-            return "type {!r} into the {} named {!r}".format(action.text, action.role, action.target)
+            return "type {!r} into the {}".format(action.text, _describe_target(action))
         case FlowActionKind.KEYS:
             return "press {}".format(action.text)
         case FlowActionKind.SCROLL:
@@ -409,6 +427,16 @@ def describe_action(action: FlowAction) -> str:
             assert_never(unreachable)
 
 
+@pure
+def _describe_target(action: FlowAction) -> str:
+    """The element an action addresses, as the record and the next prompt name it. A nameless
+    element is said to be one: the reader is told what the page failed to label, not only what
+    was clicked."""
+    if action.ref:
+        return "{} that has no accessible name (ref {})".format(action.role, action.ref)
+    return "{} named {!r}".format(action.role, action.target)
+
+
 # Actions that address an element, and so are meaningless without a name to address it by.
 _TARGETED_ACTION_KINDS: Final[frozenset[FlowActionKind]] = frozenset({FlowActionKind.CLICK, FlowActionKind.INPUT})
 
@@ -418,27 +446,81 @@ def parse_action(tool_input: dict[str, Any]) -> FlowAction | None:
     """One tool-call payload into an action.
 
     None when the payload does not describe an action that can be performed -- an action name that
-    does not exist, or one that addresses an element without naming it. Both are recorded as a call
-    that produced nothing rather than coerced into something the model did not ask for: an unnamed
-    target would otherwise resolve to whatever the page happens to list first.
+    does not exist, or one that addresses an element by neither name nor ref. Both are recorded as
+    a call that produced nothing rather than coerced into something the model did not ask for: an
+    unaddressed target would otherwise resolve to whatever the page happens to list first.
+    `describe_unusable_action` says which of those it was.
+    """
+    action, _reason = _parse_action_or_reason(tool_input)
+    return action
+
+
+@pure
+def describe_unusable_action(tool_input: dict[str, Any] | None) -> str:
+    """Why a decision produced no action, in prose for the log and the manifest entry."""
+    if tool_input is None:
+        return "the model call produced no tool payload"
+    action, reason = _parse_action_or_reason(tool_input)
+    if action is not None:
+        return "the payload was usable"
+    return reason
+
+
+# How much of a value the model supplied the explanation of an unusable decision quotes: enough to
+# diagnose it, bounded so one oversized field cannot crowd the page state out of the flow log.
+_MAX_QUOTED_CHARS: Final[int] = 200
+
+
+@pure
+def _quoted(value: str) -> str:
+    """A model-supplied value as an explanation spells it: bounded, and quoted so an empty or
+    whitespace-only one is still visible."""
+    return repr(value[:_MAX_QUOTED_CHARS])
+
+
+@pure
+def _parse_action_or_reason(tool_input: dict[str, Any]) -> tuple[FlowAction | None, str]:
+    """The action a payload describes, or the reason it describes none.
+
+    A ref rides beside a name only as a redundancy: the name is how a named element is addressed,
+    so the ref is dropped then, and the record says the element was addressed by name.
     """
     raw_kind = str(tool_input.get("action") or "").strip().lower()
     if raw_kind not in {member.value for member in FlowActionKind}:
-        return None
+        return None, "it asked for the action {}, which does not exist".format(_quoted(raw_kind))
     kind = FlowActionKind(raw_kind)
+    role = str(tool_input.get("role") or "").strip()
     target = str(tool_input.get("target") or "").strip()
-    if kind in _TARGETED_ACTION_KINDS and not target:
-        return None
+    # A ref means nothing on a kind that addresses no element, and carried onto such a step's
+    # record it would claim the step acted on a control the page had left unnamed.
+    needs_an_address = kind in _TARGETED_ACTION_KINDS and not target
+    ref = str(tool_input.get("ref") or "").strip() if needs_an_address else ""
+    if ref and not REF_PATTERN.match(ref):
+        return None, "it gave the ref {}, which is not shaped like a snapshot ref such as 'e9'".format(_quoted(ref))
+    if ref and not role:
+        # The role is what the step script checks the ref against on the page as it now stands.
+        # Without it a ref would be acted on whatever it has come to name, which is the one thing
+        # addressing by ref must not do.
+        return None, "it gave the ref {} with no role to check it against".format(_quoted(ref))
+    if needs_an_address and not ref:
+        reasoning = str(tool_input.get("reasoning") or "").strip()
+        return None, "it asked to {} {} without naming it or giving its ref; its reasoning was: {}".format(
+            kind.value,
+            "a {}".format(role[:_MAX_QUOTED_CHARS]) if role else "an element",
+            _quoted(reasoning),
+        )
     raw_amount = tool_input.get("amount")
-    return FlowAction(
+    action = FlowAction(
         kind=kind,
-        role=str(tool_input.get("role") or "").strip(),
+        role=role,
         target=target,
+        ref=ref,
         text=str(tool_input.get("text") or ""),
         amount=raw_amount if isinstance(raw_amount, int) and not isinstance(raw_amount, bool) else 0,
         reasoning=str(tool_input.get("reasoning") or "").strip(),
         expected=str(tool_input.get("expected") or "").strip(),
     )
+    return action, ""
 
 
 class VerifierCall(FrozenModel):
@@ -628,6 +710,10 @@ REASON_STEP_ERROR: Final[str] = flow_step_protocol.REASON_STEP_ERROR
 # The page did not offer what the action asked for in the time allowed. The browser is fine, so
 # this is the app falling short rather than the instrument.
 REASON_ACTION_TIMED_OUT: Final[str] = flow_step_protocol.REASON_ACTION_TIMED_OUT
+# The ref an action addressed no longer names what it was read off. Neither the browser nor the app
+# is at fault: the agent is a page behind, so the step is recorded and the flow carries on from the
+# state it is now shown.
+REASON_STALE_REF: Final[str] = flow_step_protocol.REASON_STALE_REF
 # The workspace's agent id is not a coordinate the proxy routes on, so no forwarded origin can be
 # built. The workspace may be serving perfectly; this is the harness holding an identity it cannot
 # address, so it must not be charged to the agent the way an empty registry is.
@@ -767,6 +853,7 @@ def _step_action(action: FlowAction | None) -> StepAction:
         kind=StepActionKind(action.kind.value),
         role=action.role,
         target=action.target,
+        ref=action.ref,
         text=action.text,
         amount=action.amount,
     )
@@ -1055,6 +1142,7 @@ def flow_final_record(step_index: int, observation: str, state_text: str, timest
 def flow_step_record(
     step_index: int,
     action: str,
+    target_ref: str,
     reasoning: str,
     expected: str,
     observed: str,
@@ -1079,6 +1167,11 @@ def flow_step_record(
     prose ``observed`` derives from it, so a reader tallying how often a flow's actions went
     unanswered can count it rather than parse sentences.
 
+    ``target_ref`` is set on a step that addressed an element by its snapshot ref because the
+    page gave it no accessible name, and empty otherwise. Kept as its own field, beside the prose
+    that says the same, so the judge's digest and a later measure of unlabeled controls read it
+    rather than the sentence.
+
     The state is recorded UNTRUNCATED: the judge reads this file, and it is the cheap, token-dense
     alternative to looking at screenshots.
 
@@ -1089,6 +1182,7 @@ def flow_step_record(
             "step_index": step_index,
             "timestamp": timestamp,
             "action": action,
+            "target_ref": target_ref,
             "reasoning": reasoning,
             "expected": expected,
             "observed": observed,

@@ -221,12 +221,12 @@ for P in "$@"; do
   run "$P" 'test -x /opt/fortress/tilion-fortress/tilion && echo DEFERRED_INSTALL_OK || echo DEFERRED_INSTALL_INCOMPLETE'
   run "$P" 'cd /home/user/workspace && uv run mngr list 2>/dev/null | tail -1'
   run "$P" 'git -C /home/user/workspace config --local --get user.name'
-  run "$P" 'grep -rl provider-chooser /home/user/workspace/system/apps/system_interface/imbue/system_interface/static/ >/dev/null 2>&1 && echo CONTENT_OK || echo CONTENT_STALE'
+  run "$P" "grep -q 'FALLBACK_BRANCH: Final\[str\] = \"${TAG:?set TAG to the baked minds-v tag}\"' /home/user/workspace/system/vendor/mngr/apps/minds/imbue/minds/build_info.py && echo CONTENT_OK || echo CONTENT_STALE"
   echo
 done
 SCRIPT
 chmod +x /tmp/verify-slices.sh
-POOL_KEY=/tmp/pool-<tier>.key /tmp/verify-slices.sh <BOX_ADDRESS> <container_ssh_port> [<port>...]
+TAG=minds-v<version> POOL_KEY=/tmp/pool-<tier>.key /tmp/verify-slices.sh <BOX_ADDRESS> <container_ssh_port> [<port>...]
 ```
 
 Use the script rather than inline `ssh … "…"` loops: the nested quoting and line
@@ -241,15 +241,16 @@ which reaches the outer VM instead of the workspace container.
 | `git config user.name` | a neutral value such as `minds-bootstrap`, **not the operator's name** | finalize unsets the operator identity; the dwt bootstrap then supplies its own neutral fallback on every boot. A *present* identity is correct — the failure is seeing your own name |
 | `CONTENT_OK` | ok | the real content proof |
 
-`CONTENT_OK` greps the **built** frontend bundle for a string only this release's
-content has (`provider-chooser` from 0.5.0 onward; pick a fresh marker for later
-releases). Grep the bundle, not the source, and do not bother comparing
-`git rev-parse HEAD` to the tag — `/home/user/workspace` is a **fresh repo** the
-seed creates, with its own `Initial workspace commit`, so its SHA differs per
-slice and never equals the tag. The bundle grep matters because the per-box image
-cache is keyed by tag **name**, not content: if a tag is ever moved, a box that
-already holds that tar silently loads the stale image while reporting N/N
-succeeded. This is why tags are immutable once anything has run against them.
+`CONTENT_OK` greps the vendored mngr's `build_info.py` inside the container for
+the `FALLBACK_BRANCH` line naming exactly the baked tag -- a marker every release
+carries (the 0.6.0 cut verified its slices this way), unlike a frontend string
+whose file moves between releases. Do not bother comparing `git rev-parse HEAD` to the
+tag — `/home/user/workspace` is a **fresh repo** the seed creates, with its own
+`Initial workspace commit`, so its SHA differs per slice and never equals the
+tag. The content grep matters because the per-box image cache is keyed by tag
+**name**, not content: if a tag is ever moved, a box that already holds that tar
+silently loads the stale image while reporting N/N succeeded. This is why tags
+are immutable once anything has run against them.
 
 **These checks prove the container. They do not prove the row is leasable** —
 that takes an actual lease, which happens by driving the desktop app:
