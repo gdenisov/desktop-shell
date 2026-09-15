@@ -9,7 +9,6 @@ from imbue.mngr.api.testing import created_host
 from imbue.mngr.errors import HostNotFoundError
 from imbue.mngr.errors import SnapshotNotFoundError
 from imbue.mngr.interfaces.agent import AgentInterface
-from imbue.mngr.interfaces.host import OnlineHostInterface
 from imbue.mngr.interfaces.volume import HostVolume
 from imbue.mngr.primitives import HostId
 from imbue.mngr.primitives import HostName
@@ -17,7 +16,6 @@ from imbue.mngr.primitives import HostState
 from imbue.mngr.primitives import SnapshotId
 from imbue.mngr.primitives import SnapshotName
 from imbue.mngr.utils.polling import wait_for
-from imbue.mngr_modal.errors import ModalMngrError
 from imbue.mngr_modal.errors import NoSnapshotsModalMngrError
 from imbue.mngr_modal.instance import ModalProviderInstance
 from imbue.mngr_modal.volume import ModalVolume
@@ -563,6 +561,23 @@ def _write_offline_dockerfile(tmp_path: Path) -> Path:
     return dockerfile
 
 
+# Addressed literally, over plain HTTP, so that neither DNS nor TLS can affect the
+# verdict: a CIDR allowlist governs which IPs a packet may reach, so resolving a name or
+# validating a certificate only adds ways to fail for reasons unrelated to the allowlist.
+_IN_RANGE_PROBE_IP: Final[str] = "1.1.1.1"
+_OUT_OF_RANGE_PROBE_IP: Final[str] = "8.8.8.8"
+
+
+def _curl_probe_command(ip: str, max_time_seconds: int) -> str:
+    """Build a probe whose exit status reports whether traffic to ``ip`` was allowed.
+
+    Modal blackholes traffic outside the allowlist rather than refusing it, so a blocked
+    connection and a merely slow one both end as http_code 000. ``-S`` keeps curl's own
+    account of which one happened on stderr, where a failing assertion prints it.
+    """
+    return f"curl -sS --max-time {max_time_seconds} -o /dev/null -w 'code=%{{http_code}}\\n' http://{ip}"
+
+
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
@@ -591,23 +606,30 @@ def test_cidr_allowlist_restricts_network_access(real_modal_provider: ModalProvi
 
 @pytest.mark.acceptance
 @pytest.mark.timeout(180)
-def test_cidr_allowlist_allows_traffic_within_range(real_modal_provider: ModalProviderInstance) -> None:
-    """A sandbox created with --cidr-allowlist=0.0.0.0/0 should allow all traffic.
+def test_cidr_allowlist_allows_traffic_within_range(
+    real_modal_provider: ModalProviderInstance, tmp_path: Path
+) -> None:
+    """A sandbox should reach an IP inside its --cidr-allowlist, and only that IP.
 
-    This is the complement of test_cidr_allowlist_restricts_network_access: it verifies
-    that when the target IP is within the allowed CIDR range, traffic is not blocked.
+    The complement of test_cidr_allowlist_restricts_network_access: the allowlist is
+    pinned to a single address and the same sandbox probes both that address and one
+    outside the range. Probing both is what gives the allowed case its meaning -- if the
+    allowlist were not enforced at all, the out-of-range probe would connect too.
+
+    Uses a pre-built image because the sandbox cannot apt-get install packages when
+    outbound network is restricted.
     """
+    dockerfile = _write_offline_dockerfile(tmp_path)
     with created_host(
         real_modal_provider,
         HostName("test-cidr-allow"),
-        build_args=["--cidr-allowlist=0.0.0.0/0"],
+        build_args=[f"--file={dockerfile}", f"--cidr-allowlist={_IN_RANGE_PROBE_IP}/32"],
     ) as host:
-        # curl to a public IP should succeed because 0.0.0.0/0 allows everything
-        result = host.execute_idempotent_command(
-            "curl -s --max-time 10 -o /dev/null -w '%{http_code}' https://example.com"
-        )
-        assert result.success
-        assert "200" in result.stdout
+        in_range = host.execute_idempotent_command(_curl_probe_command(_IN_RANGE_PROBE_IP, 10))
+        assert in_range.success, in_range
+
+        out_of_range = host.execute_idempotent_command(_curl_probe_command(_OUT_OF_RANGE_PROBE_IP, 5))
+        assert "code=000" in out_of_range.stdout, out_of_range
 
 
 @pytest.mark.flaky
@@ -641,24 +663,8 @@ def test_offline_blocks_all_network_access(real_modal_provider: ModalProviderIns
 # =============================================================================
 
 
-def _volume_is_visible(provider: ModalProviderInstance, host: OnlineHostInterface) -> bool:
-    """Whether the host's volume resolves via Modal's control plane.
-
-    Treats ``ModalMngrError`` (e.g. control-plane rate limits) as "not yet visible":
-    the probe runs inside ``wait_for``, which lets probe exceptions propagate, so one
-    transient blip would otherwise fail the test immediately instead of polling until
-    the timeout.
-    """
-    try:
-        return provider.get_volume_for_host(host) is not None
-    except ModalMngrError:
-        return False
-
-
-# Flaky: the volume probes (get_volume_for_host / read_file) go through Modal's
-# VolumeListFiles API, whose per-workspace rate limit can stay exceeded for
-# longer than the volume layer's in-process retry budget when the parallel
-# acceptance fan-out hammers the same workspace.
+# Flaky: a fresh sandbox can fail to come online inside the provider's bring-up
+# budget under CI's parallel fan-out (MIND-234).
 @pytest.mark.acceptance
 @pytest.mark.flaky
 @pytest.mark.timeout(180)
@@ -682,20 +688,12 @@ def test_host_volume_is_symlinked_and_persists_data(real_modal_provider: ModalPr
         assert result.success
         assert "exists" in result.stdout
 
-        # Verify get_volume_for_host returns a volume. The volume name can take a
-        # moment to become resolvable via Modal's control plane after the sandbox is
-        # created (eventual consistency), so the name-lookup probe inside
-        # get_volume_for_host may transiently return None right after creation. Poll
-        # rather than asserting once.
-        wait_for(
-            lambda: _volume_is_visible(real_modal_provider, host),
-            timeout=30.0,
-            error_message="Host volume not visible after 30s",
-        )
+        # Creating the sandbox resolves every volume it mounts, so the host volume
+        # exists on Modal's control plane by the time create_host returns.
+        assert real_modal_provider.get_volume_for_host(host) is not None
 
 
-# Flaky for the same VolumeListFiles rate-limit reason as
-# test_host_volume_is_symlinked_and_persists_data above.
+# Flaky: fresh-sandbox bring-up (MIND-234).
 @pytest.mark.flaky
 @pytest.mark.acceptance
 @pytest.mark.timeout(300)
@@ -710,16 +708,11 @@ def test_host_volume_data_readable_via_volume_interface(real_modal_provider: Mod
         host = real_modal_provider.create_host(HostName("test-vol-read"))
 
         # Write a known file and explicitly sync the volume
-        host.execute_idempotent_command("echo 'volume test content' > /mngr/volume_test.txt && sync /host_volume")
-
-        # The volume name can take a moment to become resolvable via Modal's control
-        # plane after the sandbox is created (eventual consistency), so poll rather
-        # than asserting once.
-        wait_for(
-            lambda: _volume_is_visible(real_modal_provider, host),
-            timeout=30.0,
-            error_message="Host volume not visible after 30s",
+        write_result = host.execute_idempotent_command(
+            "echo 'volume test content' > /mngr/volume_test.txt && sync /host_volume"
         )
+        assert write_result.success, write_result.stderr
+
         host_volume = real_modal_provider.get_volume_for_host(host)
         assert host_volume is not None
         assert isinstance(host_volume, HostVolume)

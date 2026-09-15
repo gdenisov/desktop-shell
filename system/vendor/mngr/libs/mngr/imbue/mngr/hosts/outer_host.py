@@ -161,6 +161,22 @@ def _list_directory_local(path: Path, recursive: bool) -> list[VolumeFile]:
     return entries
 
 
+def _is_remote_directory(sftp: SFTPClient, path: str) -> bool:
+    """Whether ``path`` is a directory, asked of the server rather than inferred.
+
+    An SFTP server refuses to open a directory for reading with an opaque
+    failure whose message is server-specific, so the only portable way to tell
+    that case apart from a genuine read error is to ask what the path is. A
+    stat that itself fails answers False, leaving the original error to stand.
+    """
+    try:
+        attrs = sftp.stat(path)
+    except IOError as e:
+        logger.trace("stat failed while classifying {}: {}", path, e)
+        return False
+    return attrs.st_mode is not None and stat.S_ISDIR(attrs.st_mode)
+
+
 def _sftp_walk(sftp: SFTPClient, dir_path: str, recursive: bool) -> list[VolumeFile]:
     """List a remote directory via SFTP ``listdir_attr``, optionally recursing.
 
@@ -287,36 +303,51 @@ retry_on_transient_ssh_error = retry(
 )
 
 
+# The transient SSH *handshake* failures a freshly provisioned or tunnel-fronted sshd
+# (a new Modal sandbox, a new VPS) exhibits, each of which clears on its own within
+# seconds. paramiko raises a distinct message per shape, and pyinfra wraps every one as
+# ``ConnectError("SSH error (<paramiko message>)")``, so they are recognized by substring:
+#   - "error reading ssh protocol banner": the endpoint accepted the TCP connection but
+#     had not answered the SSH banner yet, or a fronting tunnel accepted then reset the
+#     connection before the backend sshd was up.
+#   - "no existing session": the transport was torn down mid-handshake, so paramiko's
+#     ``get_remote_server_key`` finds no active session -- a tunnel blip during key
+#     exchange, which can strike even after a readiness probe has already succeeded.
+# Refused/unreachable/auth/host-key failures are deliberately excluded (they carry other
+# messages) so a genuinely-down host still fails fast.
+_TRANSIENT_SSH_HANDSHAKE_CONNECT_ERROR_MESSAGES: Final[tuple[str, ...]] = (
+    "error reading ssh protocol banner",
+    "no existing session",
+)
+
+
 def _is_transient_ssh_connect_error(exception: BaseException) -> bool:
-    """Check if the exception is a transient SSH connect failure worth retrying.
+    """Whether ``exception`` is a transient SSH handshake failure worth retrying.
 
-    Matches only pyinfra ``ConnectError``s wrapping paramiko's "Error reading
-    SSH protocol banner": the TCP connection was accepted but sshd did not
-    answer the SSH handshake in time, which happens transiently while a freshly
-    booted host's sshd is still coming up (e.g. a new Modal sandbox or VPS) or
-    while it is briefly overloaded. Refused/unreachable/auth/host-key failures
-    are deliberately not matched so genuinely-down hosts still fail fast.
+    True only for pyinfra ``ConnectError``s whose message names one of
+    ``_TRANSIENT_SSH_HANDSHAKE_CONNECT_ERROR_MESSAGES`` (defined above).
     """
-    return isinstance(exception, ConnectError) and "error reading ssh protocol banner" in str(exception).lower()
+    if not isinstance(exception, ConnectError):
+        return False
+    message = str(exception).lower()
+    return any(known in message for known in _TRANSIENT_SSH_HANDSHAKE_CONNECT_ERROR_MESSAGES)
 
 
-# A freshly provisioned host (a new Modal sandbox, a new VPS) transiently accepts TCP
-# before its sshd answers the SSH banner. paramiko surfaces that banner-read failure
-# either immediately (the tunnel accepts the connection then resets it before the backend
-# sshd is up) or only after the full banner timeout (a stalled tunnel) -- so a fixed count
-# of zero-wait retries can burn every attempt in milliseconds before sshd is ready. Ride
-# the race out over a wall-clock deadline with a fixed pause between attempts instead, so
-# the ride-out window does not depend on how each individual attempt happens to fail.
-SSH_CONNECT_BANNER_RETRY_DEADLINE_SECONDS: Final[float] = 30.0
-SSH_CONNECT_BANNER_RETRY_BACKOFF_SECONDS: Final[float] = 0.5
+# A transient handshake failure surfaces either immediately or only after paramiko's full
+# banner timeout, so a fixed count of zero-wait retries can burn every attempt in
+# milliseconds before sshd is ready. Ride the race out over a wall-clock deadline with a
+# fixed pause between attempts instead, so the ride-out window does not depend on how each
+# individual attempt happens to fail.
+SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS: Final[float] = 30.0
+SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS: Final[float] = 0.5
 
 
-def _connect_pyinfra_host_retrying_banner_read_failures(
+def _connect_pyinfra_host_retrying_transient_handshake_failures(
     pyinfra_host: PyinfraHost,
     deadline_seconds: float,
     backoff_seconds: float,
 ) -> None:
-    """Connect a pyinfra host, retrying banner-read failures until it answers or the deadline passes."""
+    """Connect a pyinfra host, retrying transient handshake failures until it answers or the deadline passes."""
     retrying = Retrying(
         retry=retry_if_exception(_is_transient_ssh_connect_error),
         stop=stop_after_delay(deadline_seconds),
@@ -435,6 +466,31 @@ def _prepend_env_exports(command: str, env: Mapping[str, str] | None) -> str:
     return f"{exports} {command}"
 
 
+def _build_replay_safe_rename_command(source_path: Path, destination_path: Path) -> str:
+    """Build the rename half of an atomic write so that re-running it is harmless.
+
+    The rename goes out through ``execute_idempotent_command``, which retries on
+    a transient SSH error and cannot tell "the command never ran" apart from
+    "the command ran but its result was lost on the way back", so it has to
+    survive a replay of a run that succeeded. The source name is unique to one
+    write and nothing else consumes it, so its absence means this very rename
+    already completed. Losing the destination as well means something outside
+    this write removed both, which stays an error.
+    """
+    quoted_source = shlex.quote(str(source_path))
+    quoted_destination = shlex.quote(str(destination_path))
+    return "\n".join(
+        (
+            f"if [ -e {quoted_source} ]; then",
+            f"  mv -f {quoted_source} {quoted_destination}",
+            f"elif [ ! -e {quoted_destination} ]; then",
+            f"  echo 'neither the staged file nor its destination exists:' {quoted_source} {quoted_destination} >&2",
+            "  exit 1",
+            "fi",
+        )
+    )
+
+
 class OuterHost(OuterHostInterface):
     """A minimal, agent-less host backed by a pyinfra connector.
 
@@ -518,10 +574,10 @@ class OuterHost(OuterHostInterface):
         if self.connector.host.connected:
             return
         try:
-            _connect_pyinfra_host_retrying_banner_read_failures(
+            _connect_pyinfra_host_retrying_transient_handshake_failures(
                 self.connector.host,
-                SSH_CONNECT_BANNER_RETRY_DEADLINE_SECONDS,
-                SSH_CONNECT_BANNER_RETRY_BACKOFF_SECONDS,
+                SSH_CONNECT_HANDSHAKE_RETRY_DEADLINE_SECONDS,
+                SSH_CONNECT_HANDSHAKE_RETRY_BACKOFF_SECONDS,
             )
         except ConnectError as e:
             message = str(e).lower()
@@ -547,6 +603,8 @@ class OuterHost(OuterHostInterface):
         transport = _get_ssh_transport(self.connector.host)
         if transport is not None:
             transport.set_keepalive(SSH_KEEPALIVE_INTERVAL_SECONDS)
+        # Keepalives cannot detect a peer that vanished during a suspension.
+        self.mngr_ctx.suspension_watchdog.register(transport)
         # We just (re)built the connection. If a cooperative lock was held, the dropped
         # connection orphaned its lock channel and released the flock, so re-acquire and
         # verify that no other actor acquired in the gap before any operation proceeds.
@@ -922,6 +980,15 @@ class OuterHost(OuterHostInterface):
             error_msg = str(e)
             if "No such file" in error_msg or "not found" in error_msg.lower():
                 raise FileNotFoundError(f"File not found: {remote_filename}") from e
+            # Reading a directory fails here with a server-specific message, so
+            # classify it by asking the server; this keeps a remote read's error
+            # the same OSError subclass a local read of a directory raises. Only
+            # a failure the server actually answered is worth asking about: a
+            # timed-out or dead connection cannot answer, and must not be made
+            # slower by the attempt.
+            is_answered_by_server = not isinstance(e, TimeoutError) and not is_dead_ssh_connection_error(e)
+            if is_answered_by_server and _is_remote_directory(sftp, remote_filename):
+                raise IsADirectoryError(f"Is a directory: {remote_filename}") from e
             raise
         finally:
             sftp.close()
@@ -1236,41 +1303,69 @@ class OuterHost(OuterHostInterface):
             return output.getvalue()
 
     def write_file(self, path: Path, content: bytes, mode: str | None = None, is_atomic: bool = False) -> None:
-        """Write bytes content to a file, creating parent directories as needed."""
+        """Write bytes content to a file, creating parent directories as needed.
+
+        ``mode`` is an octal string (e.g. ``"0755"``) applied to the final path. With
+        ``is_atomic`` the bytes land in a sibling temp file that is renamed over ``path``
+        once complete, so a reader never sees a half-written file; the mode goes on
+        before that rename, so the file is never published without it.
+        """
         if is_atomic:
             write_path = path.parent / f".{path.name}.{uuid4().hex}.tmp"
         else:
             write_path = path
 
         if self.is_local:
-            try:
-                write_path.write_bytes(content)
-            except FileNotFoundError:
-                write_path.parent.mkdir(parents=True, exist_ok=True)
-                write_path.write_bytes(content)
+            self._write_file_local(path, write_path, content, mode)
         else:
-            try:
-                is_success = self._put_file(io.BytesIO(content), str(write_path))
-            except IOError:
-                is_success = False
-            if not is_success:
-                parent_dir = str(write_path.parent)
-                result = self.execute_idempotent_command(f"mkdir -p '{parent_dir}'")
-                if not result.success:
-                    raise MngrError(
-                        f"Failed to create parent directory '{parent_dir}' on outer host {self.id} because: {result.stderr}"
-                    )
-                is_success = self._put_file(io.BytesIO(content), str(write_path))
-                if not is_success:
-                    raise MngrError(f"Failed to write file '{str(write_path)}' on outer host {self.id}'")
+            self._write_file_remote(path, write_path, content, mode)
+
+    def _write_file_local(self, path: Path, write_path: Path, content: bytes, mode: str | None) -> None:
+        """Write, chmod, and rename straight through the local filesystem.
+
+        Every step the remote path delegates to a shell command is a direct filesystem
+        call here. Spawning a shell to chmod a file this process just wrote costs more
+        than the write did, and that latency is what stretches under a loaded machine.
+        """
+        try:
+            write_path.write_bytes(content)
+        except FileNotFoundError:
+            write_path.parent.mkdir(parents=True, exist_ok=True)
+            write_path.write_bytes(content)
+        if mode is not None:
+            write_path.chmod(int(mode, 8))
         if write_path != path:
-            result = self.execute_idempotent_command(f"mv '{str(write_path)}' '{str(path)}'")
+            # The temp file is a sibling of its destination, so this is a same-filesystem
+            # rename: atomic, and it replaces any existing file.
+            os.replace(write_path, path)
+
+    def _write_file_remote(self, path: Path, write_path: Path, content: bytes, mode: str | None) -> None:
+        """Write, chmod, and rename over the connection, via SFTP plus shell commands."""
+        try:
+            is_success = self._put_file(io.BytesIO(content), str(write_path))
+        except IOError:
+            is_success = False
+        if not is_success:
+            parent_dir = str(write_path.parent)
+            result = self.execute_idempotent_command(f"mkdir -p {shlex.quote(parent_dir)}")
+            if not result.success:
+                raise MngrError(
+                    f"Failed to create parent directory '{parent_dir}' on outer host {self.id} because: {result.stderr}"
+                )
+            is_success = self._put_file(io.BytesIO(content), str(write_path))
+            if not is_success:
+                raise MngrError(f"Failed to write file '{str(write_path)}' on outer host {self.id}'")
+        # The mode goes on before the rename, so an atomic write publishes the
+        # file already carrying it rather than leaving it at the umask default
+        # (commonly world-readable) until a second round-trip lands.
+        if mode is not None:
+            self.execute_idempotent_command(f"chmod {shlex.quote(mode)} {shlex.quote(str(write_path))}")
+        if write_path != path:
+            result = self.execute_idempotent_command(_build_replay_safe_rename_command(write_path, path))
             if not result.success:
                 raise MngrError(
                     f"Failed to move temp file to final location on outer host {self.id} because: {result.stderr}"
                 )
-        if mode is not None:
-            self.execute_idempotent_command(f"chmod {mode} '{str(path)}'")
 
     def read_text_file(self, path: Path, encoding: str = "utf-8") -> str:
         """Read a file and return its contents as a string."""

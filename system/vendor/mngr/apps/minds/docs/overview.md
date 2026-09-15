@@ -14,13 +14,13 @@ The desktop client (`minds run`) provides:
 - Agent creation from git repositories or local paths via a web form or API
 - Byte-forwarding of HTTP and WebSocket traffic from `[<service>.]host-<hex>.localhost:8421/*` to the workspace's own backends: the bare origin reaches the system interface (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`), `<service>.` origins reach that registered service (optionally through an SSH tunnel for remote agents)
 
-Each workspace runs its own system interface (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`), which serves the dockview UI at the workspace's bare origin. Every other registered service owns its own origin, so nothing proxies or rewrites service traffic. Browsers access a workspace at `https://host-<hex>.localhost:8421/` and its individual services at `https://<service_name>.host-<hex>.localhost:8421/`.
+Each workspace runs its own system interface (the `system-interface` CLI, source at `default-workspace-template/system/apps/system_interface/`), which serves the dockview UI at the workspace's bare origin. Every other registered service owns its own origin, so nothing proxies or rewrites service traffic. The workspace's chat is a registered app (`chat`) at its own origin, and the system interface frames app pages in its tabs. Browsers access a workspace at `https://host-<hex>.localhost:8421/` and its individual services at `https://<service_name>.host-<hex>.localhost:8421/`.
 
 ### Agent container (runs in Docker)
 
 Inside each agent's Docker container:
 - **Claude Code** runs as the main agent process in tmux window 0
-- The **bootstrap** (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf` (logs under `/var/log/supervisor`)
+- The **bootstrap** (`uv run bootstrap`) runs first-boot setup and then execs `supervisord -n`, which supervises the background services declared as `[program:*]` sections in `supervisord.conf`, or in the drop-in files its `[include]` glob pulls in (logs under `/var/log/supervisor`)
 - Apps register their ports via `system/scripts/forward_port.py` into `data/.state/apps.toml`
 - An **app watcher** service monitors `apps.toml` and writes service events to `events/services/events.jsonl` for discovery
 - A **share-gateway** service watches `data/.secrets/share.env` for relay materials and runs the workspace's share stack (relay tunnel + in-workspace TLS) while sharing is enabled

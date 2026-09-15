@@ -36,8 +36,10 @@ _generate-release-dockerfile:
 test-offload args="":
     #!/bin/bash
     set -ueo pipefail
-    : "${MODAL_TOKEN_ID:?must be set}"
-    : "${MODAL_TOKEN_SECRET:?must be set}"
+    # No MODAL_TOKEN_ID / MODAL_TOKEN_SECRET check here: this recipe passes them
+    # nowhere. offload's Modal client resolves credentials itself, the same way
+    # the `modal` CLI does -- the environment first (CI injects the pair), else
+    # ~/.modal.toml -- so demanding them here only blocks local runs.
     just _generate-dockerignore
     trap "rm -f .dockerignore" EXIT
     offload -c offload-modal.toml run --trace \
@@ -213,13 +215,13 @@ tmr-mngr *args:
 tmr-minds *args:
   uv run --project libs/mngr_tmr mngr tmr apps/minds --name tmr-minds --mapper-prompt apps/minds/tmr/mapper.j2 {{args}} -- -m 'release and not minds_deployment and not minds_services and not minds_snapshot_resume'
 
-# minds behavior corpus (`mngr tmr-behaviors`: one agent per feature file, creating
-# and updating the tests that witness the behaviors). No testing flags after `--`:
-# behavior mappers run the specific witness tests they touch by node id, and
-# host-capability guardrails live in the variant prompt's infra_blockers block.
+# minds behavior corpus (`mngr witness`: setup, one mapper per feature file, a
+# reviewer per mapper, integration, and an annealer). The project's prompt
+# variant at apps/minds/witness/mapper.j2 is discovered positionally, and
+# host-capability guardrails live in its infra_blockers block.
 [group("minds test")]
-tmr-behaviors-minds *args:
-  uv run --project libs/mngr_tmr mngr tmr-behaviors --root apps/minds/behaviors --name tmr-behaviors-minds --mapper-prompt apps/minds/tmr/behaviors_mapper.j2 {{args}}
+witness-minds *args:
+  uv run mngr witness --root apps/minds/behaviors {{args}}
 
 # === minds deployment / services test orchestrator ===
 # Wraps apps/minds_admin/scripts/test_deployments.py. See specs/minds-deployment-tests.md
@@ -353,6 +355,11 @@ minds-evals-run dataset job_name concurrency="4" *harbor_args="":
     #!/usr/bin/env bash
     set -euo pipefail
     : "${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY -- the decider and judge call the Anthropic API}"
+    # just splices a variadic parameter in as raw text, so `{{harbor_args}}` below is subject to
+    # word splitting (which is how several --ak flags arrive as several words) AND to pathname
+    # expansion, which nothing here wants: `--ak model=opus[1m]` is a valid glob bracket
+    # expression, and a matching file in the working directory would rewrite the model.
+    set -f
     # --project selects the standalone minds_evals venv (harbor and the driver
     # package live only there); it leaves cwd at the repo root, so the
     # root-relative -o/-p paths below stay correct.
@@ -370,6 +377,43 @@ minds-evals-run dataset job_name concurrency="4" *harbor_args="":
         {{harbor_args}})
     echo ">> ${cmd[*]}"
     "${cmd[@]}"
+
+# List the Modal environments YOUR OWN run left behind, without deleting any of
+# them. A trial never destroys its environment: it outlives the sandboxes inside
+# it and is where a failed trial's workspace state is recovered from. So every
+# run leaks one environment per trial, on purpose, and removing them is opt-in.
+[group("minds evals")]
+minds-evals-list-environments job_dir:
+    uv run --project apps/minds_evals minds-evals cleanup-environments --job-dir "{{job_dir}}" --dry-run
+
+# Delete exactly the Modal environments the trials in JOB_DIR recorded, and
+# nothing else -- the names come from each trial's own state.json, never from a
+# pattern. Run the list recipe above first and read what it prints. There is
+# deliberately no developer-facing sweep: a sweep by name is the scheduled job's
+# backstop for its own runs, and pointing one at a shared prefix would take out
+# somebody else's environments along with yours.
+[group("minds evals")]
+minds-evals-cleanup-environments job_dir:
+    uv run --project apps/minds_evals minds-evals cleanup-environments --job-dir "{{job_dir}}"
+
+# Browse a harbor job or task directory with the vendored viewer
+# (apps/minds_evals/viewer, a copy of harbor's own frontend -- see its
+# VENDORED_FROM.md). The backend is stock harbor; only the frontend is ours,
+# which is how eval-specific annotations get rendered without forking harbor's
+# Python. Which of the two viewer modes to serve is read off the folder, the
+# same way `harbor view` reads it. Builds first if the sources are newer than
+# the last build, bootstrapping bun into the project on first use; expect ~10s
+# once and ~2s after.
+[group("minds evals")]
+minds-evals-view folder="apps/minds_evals/jobs" port="8080":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    apps/minds_evals/scripts/build_viewer.sh
+    # --project selects the standalone minds_evals venv, where harbor lives; it
+    # leaves cwd at the repo root, so the root-relative folder path stays correct.
+    uv run --project apps/minds_evals python -m imbue.minds_evals.viewer_server \
+        --folder "{{folder}}" --port "{{port}}"
+
 
 # Create an independent default-workspace-template checkout nested in the
 # current mngr checkout at .external_worktrees/default-workspace-template -- the
@@ -1626,7 +1670,7 @@ server-audit:
 # without charging; the real order records a bare_metal_servers row at 'ordered'
 # and echoes its server id for `just server-await-delivery` / `just server-setup`.
 #
-#   just server-order --dry-run --plan-code 24sys032-us --region vin --memory-gb 128 --storage softraid-2x960nvme ...
+#   just server-order --dry-run --plan-code 24sys03-v1-us --region vin --memory-gb 128 --storage softraid-2x960nvme ...
 [group("minds ops")]
 server-order *args:
     uv run minds-admin server order {{args}}

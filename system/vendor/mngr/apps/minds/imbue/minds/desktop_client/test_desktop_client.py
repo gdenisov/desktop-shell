@@ -44,6 +44,7 @@ from imbue.minds.desktop_client.backup_env_store import write_canonical_env
 from imbue.minds.desktop_client.conftest import DEFAULT_SERVICE_NAME
 from imbue.minds.desktop_client.conftest import make_agents_json
 from imbue.minds.desktop_client.conftest import make_fake_imbue_cloud_cli
+from imbue.minds.desktop_client.conftest import make_profiled_device_for_test
 from imbue.minds.desktop_client.conftest import make_resolver_with_data
 from imbue.minds.desktop_client.conftest import make_session_store_for_test
 from imbue.minds.desktop_client.console_log_staging import ELECTRON_CONSOLE_TAIL_FILENAME
@@ -55,6 +56,7 @@ from imbue.minds.desktop_client.cookie_manager import create_session_cookie
 from imbue.minds.desktop_client.data_types import BackupAccessState
 from imbue.minds.desktop_client.data_types import RemoteWorkspaceKind
 from imbue.minds.desktop_client.dek_store import bundle_mirror_path
+from imbue.minds.desktop_client.dek_store import delete_dek
 from imbue.minds.desktop_client.dek_store import ensure_dek
 from imbue.minds.desktop_client.dek_store import is_account_unlocked
 from imbue.minds.desktop_client.dek_store import set_master_password_for_account
@@ -68,6 +70,8 @@ from imbue.minds.desktop_client.state import get_state
 from imbue.minds.desktop_client.sync_scheduler import WorkspaceSyncScheduler
 from imbue.minds.desktop_client.system_interface_health import AgentHealth
 from imbue.minds.desktop_client.system_interface_health import SystemInterfaceHealthTracker
+from imbue.minds.desktop_client.testing import RefusingSpawnMngrCaller
+from imbue.minds.desktop_client.testing import SIGNED_IN_ACCOUNT_DIR
 from imbue.minds.desktop_client.testing import StaticPendingRequests
 from imbue.minds.desktop_client.testing import blocking_release_wait_body
 from imbue.minds.desktop_client.testing import build_resolver_with_system_services
@@ -75,6 +79,7 @@ from imbue.minds.desktop_client.testing import create_predefined_permission_requ
 from imbue.minds.desktop_client.testing import drain_ui_channel_frames
 from imbue.minds.desktop_client.testing import exec_json_envelope
 from imbue.minds.desktop_client.testing import install_stub_mngr_on_path
+from imbue.minds.desktop_client.testing import ready_machine_probe_stdout
 from imbue.minds.desktop_client.testing import record_provider_discovery_error
 from imbue.minds.desktop_client.testing import tamper_session_cookie_signed_content
 from imbue.minds.desktop_client.testing import write_stub_mngr
@@ -607,6 +612,73 @@ def test_build_workspace_list_returns_workspaces_for_the_channel(tmp_path: Path)
     workspaces = _build_workspace_list(backend_resolver)
     assert len(workspaces) == 1
     assert workspaces[0]["id"] == str(agent_id)
+
+
+def test_build_workspace_list_says_why_a_cloud_row_cannot_open_from_this_device(tmp_path: Path) -> None:
+    """A live cloud row this device holds no SSH key for carries a ``key_state`` naming the remedy.
+
+    The machine is listed on every device signed in to its account, but only
+    a device that has decrypted its record can connect: without the key the
+    row used to open onto a blank surface until the forward gave up.
+    """
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    paths, record_store, session_store, _profile_dir = make_profiled_device_for_test(tmp_path, "this", cli)
+    instance_name = imbue_cloud_provider_name_for_account("a@b.com")
+    agent_id = AgentId.generate()
+    host_id = HostId.generate()
+    agents = [
+        {
+            "id": str(agent_id),
+            "labels": {"is_primary": "true"},
+            "host": {"id": str(host_id), "name": "cloud-ws"},
+            "provider": instance_name,
+        }
+    ]
+    backend_resolver = make_resolver_with_data(agents_json=json.dumps({"agents": agents}))
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id=str(host_id),
+        display_name="cloud-ws",
+        color=None,
+        is_cloud_row=True,
+    )
+
+    # No bundle anywhere: nothing to unlock, so no key can ever arrive.
+    assert _build_workspace_list(backend_resolver, session_store)[0]["key_state"] == "unavailable"
+    # Unlocked, key not materialized yet: the sync is what brings it.
+    assert set_master_password_for_account(paths, "user-1", SecretStr("pw")) is not None
+    assert _build_workspace_list(backend_resolver, session_store)[0]["key_state"] == "syncing"
+    # A bundle mirror without a DEK is a locked account: the password opens it.
+    delete_dek(paths, "user-1")
+    assert _build_workspace_list(backend_resolver, session_store)[0]["key_state"] == "locked"
+    # With the key on disk the row opens like any other, whatever the lock state.
+    key_path = record_store.imbue_cloud_host_ssh_key_path("a@b.com", str(host_id))
+    assert key_path is not None
+    key_path.parent.mkdir(parents=True)
+    key_path.write_text("not-a-real-key\n")
+    assert "key_state" not in _build_workspace_list(backend_resolver, session_store)[0]
+
+
+def test_build_workspace_list_never_flags_a_local_row_for_a_missing_key(tmp_path: Path) -> None:
+    cli = make_fake_imbue_cloud_cli()
+    cli.add_account(user_id="user-1", email="a@b.com")
+    session_store = make_session_store_for_test(tmp_path, cli=cli)
+    agent_id = AgentId.generate()
+    backend_resolver = make_resolver_with_data(agents_json=make_agents_json(agent_id, host_name="local-ws"))
+    session_store.associate_created_workspace(
+        user_id="user-1",
+        agent_id=str(agent_id),
+        host_id="host-local",
+        display_name="local-ws",
+        color=None,
+        is_cloud_row=False,
+    )
+
+    rows = _build_workspace_list(backend_resolver, session_store)
+    assert rows[0]["account"] == "a@b.com"
+    assert "key_state" not in rows[0]
 
 
 def test_destroying_marker_includes_ids_with_live_destroy(tmp_path: Path) -> None:
@@ -1360,17 +1432,105 @@ def test_help_assist_reports_unreachable_workspace(tmp_path: Path) -> None:
     assert len(caller.calls) == 1
 
 
+_ASSIST_SKILL_PRESENT_STDOUT = "MNGR_ASSIST_SKILL_PRESENT\n"
+
+
 def test_help_assist_spawns_when_the_skill_is_present(tmp_path: Path) -> None:
-    """A supported machine probes clean, then the chat is created (probe call + create call)."""
-    caller = RecordingMngrCaller(result=MngrCallResult(returncode=0, stdout="MNGR_ASSIST_SKILL_PRESENT\n"))
+    """A supported machine that writes no create defaults probes clean, is asked its resolver, and the chat is
+    created bound to the account it named."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=ready_machine_probe_stdout(_ASSIST_SKILL_PRESENT_STDOUT))
+    )
     client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
     response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
     assert response.status_code == 200
-    # First the skill probe, then the inner ``mngr create``.
-    assert len(caller.calls) == 2
+    # The skill probe, the account probe, then the inner ``mngr create``.
+    assert len(caller.calls) == 3
     assert caller.calls[0][0] == "exec"
-    assert caller.calls[1][:2] == ["exec", "--agent"]
-    assert "mngr create" in caller.calls[1][3]
+    assert "system/scripts/default_account_args.py" in caller.calls[1][3]
+    create = caller.calls[2]
+    assert create[:2] == ["exec", "--agent"]
+    assert "mngr create" in create[3]
+    # An unbound chat would answer every turn "Not logged in".
+    assert f"CLAUDE_CONFIG_DIR={SIGNED_IN_ACCOUNT_DIR}" in create[3]
+
+
+def test_help_assist_spawns_unbound_on_a_machine_whose_template_keeps_no_accounts(tmp_path: Path) -> None:
+    """Before the account store one shared config dir held the credential, so a binding would point at nothing."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0, stdout=ready_machine_probe_stdout(_ASSIST_SKILL_PRESENT_STDOUT, account_dir=None)
+        )
+    )
+    client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
+
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+
+    assert response.status_code == 200
+    create = caller.calls[2]
+    assert "mngr create" in create[3]
+    assert "CLAUDE_CONFIG_DIR" not in create[3]
+
+
+def test_help_assist_spawns_bare_on_a_machine_that_writes_its_create_defaults(tmp_path: Path) -> None:
+    """The machine's own mngr resolves the account and harness: one probe, then a create naming neither."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0,
+            stdout=ready_machine_probe_stdout(_ASSIST_SKILL_PRESENT_STDOUT, is_local_settings_present=True),
+        )
+    )
+    client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
+
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+
+    assert response.status_code == 200
+    assert len(caller.calls) == 2
+    create = caller.calls[1][3]
+    assert "mngr create" in create
+    assert "CLAUDE_CONFIG_DIR" not in create and "--type" not in create
+    # The one setting the app adds: the lever for a machine whose claude no longer matches its pin.
+    assert "agent_types.claude.check_installation=false" in create
+
+
+def test_help_assist_spawns_unbound_when_the_resolver_names_no_account(tmp_path: Path) -> None:
+    """The create runs, and what the machine makes of it is the verdict the user sees, rather than a
+    refusal the app composes out here."""
+    caller = RecordingMngrCaller(
+        result=MngrCallResult(
+            returncode=0, stdout=ready_machine_probe_stdout(_ASSIST_SKILL_PRESENT_STDOUT, account_dir="")
+        )
+    )
+    client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
+
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+
+    assert response.status_code == 200
+    create = caller.calls[2][3]
+    assert "mngr create" in create
+    assert "CLAUDE_CONFIG_DIR" not in create
+
+
+def test_help_assist_tells_the_user_what_a_refusing_machine_said(tmp_path: Path) -> None:
+    """A machine that will not start any agent is one retrying cannot fix, so its own words have to reach the user."""
+    caller = RefusingSpawnMngrCaller(
+        result=MngrCallResult(returncode=0, stdout=ready_machine_probe_stdout(_ASSIST_SKILL_PRESENT_STDOUT)),
+        refusal_stderr=(
+            "WARNING: outer SSH unreachable for host host-other: Host not found: host-other\n"
+            "Error: Unknown fields in agent_types.opencode: ['auto_allow_permissions']\n"
+            "ERROR: Command failed on agent system-services\n"
+        ),
+    )
+    client, _ = _create_test_client_with_stores(tmp_path, mngr_caller=caller)
+
+    response = client.post("/help/assist", json={"description": "it broke", "workspace_agent_id": str(AgentId())})
+
+    assert response.status_code == 502
+    body = response.get_json()
+    assert body["error"] == "Couldn't start an agent in this machine."
+    assert body["detail"].startswith("Error: Unknown fields in agent_types.opencode")
+    # The unrelated unreachable host is the first thing mngr prints and the last thing to blame.
+    assert "outer SSH unreachable" not in body["detail"]
 
 
 def test_help_report_requires_description(tmp_path: Path) -> None:

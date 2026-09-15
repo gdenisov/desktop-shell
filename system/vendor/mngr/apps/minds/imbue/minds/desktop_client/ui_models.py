@@ -97,6 +97,13 @@ class UiWorkspaceEntry(FrozenModel):
     liveness: str = Field(
         default="", description="RUNNING / STOPPED / STOPPING / STARTING / UNKNOWN when supports_shutdown, else empty"
     )
+    stop_kind: str = Field(
+        default="",
+        description=(
+            "Why a cloud machine's current stop happened: owner / maintenance / idle / suspension, 'unknown' for a "
+            "kind this build does not recognize, empty while running or when not known"
+        ),
+    )
     account: str = Field(default="", description="Owning account email, when known")
     create_attempt_state: str = Field(
         default="", description="creating / interrupted / failed for create-attempt rows; empty for real workspaces"
@@ -119,6 +126,14 @@ class UiWorkspaceEntry(FrozenModel):
             "For remote rows: 'available' when this device can read the workspace's backups now, 'locked' when "
             "the synced credentials need the master password here, 'unavailable' when no credentials reach this "
             "device; empty for live rows"
+        ),
+    )
+    key_state: str = Field(
+        default="",
+        description=(
+            "For a live cloud row this device holds no SSH key for (so it cannot open the machine): 'locked' "
+            "when the synced key needs the master password here, 'syncing' when the account is unlocked and "
+            "the key has not arrived yet, 'unavailable' when no key can reach this device; empty otherwise"
         ),
     )
 
@@ -307,7 +322,7 @@ class UiWorkspaceUpdate(FrozenModel):
     )
     is_version_from_label: bool = Field(
         description="Whether the version came from the create-time label because the machine's own git "
-        "could not be read"
+        "has not been read this session (it has been unreachable throughout, or every read so far failed)"
     )
     activity: UpdateActivity = Field(description="What an update run is doing right now")
     run_started_at: datetime | None = Field(
@@ -636,6 +651,12 @@ class UiWorkspacePermissions(FrozenModel):
         description="Pending permission requests from this workspace, oldest first"
     )
     permissions_unavailable: bool = Field(description="True when the permissions could not be loaded at all")
+    is_credential_store_shared: bool = Field(
+        description=(
+            "True when this machine's credentials are this computer's, shared by every local machine, "
+            "so a sign-out here reaches all of them; false when the machine holds its own"
+        )
+    )
 
 
 class UiConnectorToggleRequest(FrozenModel):
@@ -664,18 +685,23 @@ class UiConnectorRevokeAllRequest(FrozenModel):
 class UiConnectorDisconnectRequest(FrozenModel):
     """Body of POST /ui/api/workspaces/<agent_id>/permissions/connector-disconnect.
 
-    Names the connection being disconnected, not the workspace it was
-    disconnected from: clearing the credential is global, so the same body is
-    sent whichever workspace's pane the button was pressed in, and the
-    ``<agent_id>`` in the path only decides which workspace's refreshed view
+    Names the connection being disconnected, not the store it is cleared from:
+    that follows from the ``<agent_id>`` in the path, which decides both which
+    machine's credentials are cleared and which workspace's refreshed view
     comes back. Deliberately NOT :class:`UiConnectorRevokeAllRequest` despite
     the identical fields -- that one drops this machine's grants and leaves the
     account connected, and the generated TypeScript name is what the call site
     reads.
     """
 
-    service_name: str = Field(description="Catalog service the account is disconnected from, on every machine")
+    service_name: str = Field(description="Catalog service the account is disconnected from")
     account: str = Field(description="Latchkey account key ('' for the unnamed default)")
+
+
+class UiConnectBrowserRequest(FrozenModel):
+    """Body of POST /ui/api/workspaces/<agent_id>/permissions/connect-browser."""
+
+    service_name: str = Field(description="Catalog service to sign in to, for this workspace's machine")
 
 
 class UiConnectCredentialsRequest(FrozenModel):
