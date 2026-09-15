@@ -15,6 +15,18 @@ from imbue.minds_evals import flow_browser
 from imbue.minds_evals.template_loading import load_template_module
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Mark every test that reaches the `chromium_path` fixture as `chromium`.
+
+    Keyed on the fixture rather than on a file, so a browser test in any file lands in the browser
+    session `just test-minds-evals` runs apart from the rest of the suite. An unmarked one would
+    still run, but in the rest-of-suite session, spending that session's time budget.
+    """
+    for item in items:
+        if isinstance(item, pytest.Function) and "chromium_path" in item.fixturenames:
+            item.add_marker(pytest.mark.chromium)
+
+
 @pytest.fixture(scope="session")
 def chromium_path() -> Path:
     """The Chromium the flow lab launches: playwright's, resolved the way the box resolves its own.
