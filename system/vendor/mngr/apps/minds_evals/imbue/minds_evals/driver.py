@@ -1129,6 +1129,19 @@ def _settled_worker_count(
     )
 
 
+@pure
+def _worker_trajectory_id(capture: WorkerCapture) -> str:
+    """The id a worker's stream-built document is embedded under.
+
+    Normally the mngr agent id the capture resolved. When neither the listing nor the captured
+    document named one, the stream itself cannot supply it -- its header hashes the agent id rather
+    than carrying it -- so the launch name stands in, which is unique per trial and cannot be
+    mistaken for an mngr id. Embedding under a stand-in keeps the worker's evidence in the
+    trajectory; `WorkerCapture.agent_id` stays empty, so nothing reports a made-up mngr id.
+    """
+    return capture.agent_id or "worker-{}".format(capture.launch.name)
+
+
 def _worker_document_or_none(capture: WorkerCapture) -> dict[str, Any] | None:
     """The worker's document: the one mngr built inside the workspace when it was captured, else one
     built here from its stream (a destroyed worker only leaves its preserved stream), else None."""
@@ -1143,16 +1156,12 @@ def _worker_document_or_none(capture: WorkerCapture) -> dict[str, Any] | None:
                 exc,
             )
     stream_path = capture.stream.host_path
-    if stream_path is None or not capture.agent_id:
-        logger.warning(
-            "Worker {} is not embedded in the trajectory: {}",
-            capture.launch.name,
-            "its stream was not captured" if stream_path is None else "no agent id was resolved to build it under",
-        )
+    if stream_path is None:
+        logger.warning("Worker {} is not embedded in the trajectory: its stream was not captured", capture.launch.name)
         return None
     try:
         return trajectory_building.build_worker_trajectory_from_stream(
-            stream_path.read_text(), capture.agent_id, capture.agent_type or _DEFAULT_WORKER_AGENT_TYPE
+            stream_path.read_text(), _worker_trajectory_id(capture), capture.agent_type or _DEFAULT_WORKER_AGENT_TYPE
         )
     except (OSError, TrajectoryDocumentError) as exc:
         logger.warning("Could not build worker {}'s trajectory from its stream: {}", capture.launch.name, exc)
@@ -1179,6 +1188,7 @@ def _embedded_workers(
         embedded_by_name[capture.launch.name] = trajectory_building.EmbeddedWorker(
             launch=capture.launch,
             document=trajectory_building.graft_worker_trajectories(document, children),
+            agent_id=capture.agent_id,
             state=capture.state,
             report_path=report_path.relative_to(host_logs_dir).as_posix() if report_path is not None else "",
         )

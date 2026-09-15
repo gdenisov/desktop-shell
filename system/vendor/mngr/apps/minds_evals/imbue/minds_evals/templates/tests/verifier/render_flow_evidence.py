@@ -88,6 +88,21 @@ _RELOAD_NOTE = (
 )
 
 
+# A step whose record carries a ref acted on a control the page exposes with no accessible name.
+# That is the app's accessibility falling short, and it is kept in the record for a measure of its
+# own. The judge rules on the flow's declared actions and `expect`: where those ask for nothing
+# about accessibility the defect is not theirs to score, and where they do, the judge is not told
+# to look away from evidence the record itself put in front of it.
+_UNNAMED_CONTROL_NOTE = (
+    "Note on unnamed controls: a step marked 'addressed by ref' acted on a control the page exposes "
+    "with no accessible name -- no label, no aria-label -- which the agent could only address by "
+    "its position in the accessibility tree. That is an accessibility defect of the delivered app, "
+    "recorded here for a separate measure of it. Unless the declared actions or the expectation you "
+    "are judging call for accessibility, it is not what this flow measures, and on its own it is not "
+    "meant to lower the score you give here."
+)
+
+
 def _declared_flows(case_path: Path) -> dict[str, dict[str, Any]]:
     """Each declared flow by its check id: what it asked for, and what it expects to end up seeing.
 
@@ -204,8 +219,14 @@ def _render_step(step: dict[str, Any], max_state_chars: int) -> list[str]:
     """
     lines = [
         "  step {}: {}".format(step.get("step_index"), step.get("action") or "(no action)"),
-        "    agent reasoning: {}".format(step.get("reasoning") or "(none recorded)"),
     ]
+    target_ref = str(step.get("target_ref") or "")
+    if target_ref:
+        lines.append(
+            "    addressed by ref: the page gives this control no accessible name (see the note on "
+            "unnamed controls above)"
+        )
+    lines.append("    agent reasoning: {}".format(step.get("reasoning") or "(none recorded)"))
     expected = str(step.get("expected") or "")
     if expected:
         lines.append("    and expected: {}".format(expected))
@@ -327,6 +348,8 @@ def render_digest(
             "frames were dropped to stay within the attachment ceiling.".format(attached_count, chosen_count)
         )
     index_lines += ["", attachment_line, "", _RELOAD_NOTE, ""]
+    if any(step.get("target_ref") for steps in steps_by_flow.values() for step in steps):
+        index_lines += [_UNNAMED_CONTROL_NOTE, ""]
 
     index = "\n".join(index_lines) + "\n"
     # The index is always kept whole: it is what tells the judge how many flows there were and how

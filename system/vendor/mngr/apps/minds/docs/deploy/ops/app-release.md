@@ -415,8 +415,9 @@ connector log for `Could not read the web pin` (a feed read problem) or `No web
 pin published` (the channel file is missing).
 
 Staging and dev envs publish no feed, so this step does not apply there: their
-browser creates pin to the deploy-time `MINDS_WEB_TEMPLATE_REF`, which is why
-those tiers bake before they deploy.
+browser creates pin to the deploy-time `MINDS_WEB_TEMPLATE_REF`, so a deploy
+moves them at once. Those tiers still deploy first and bake right after; their
+browser-chrome creates answer 503 in between, which is acceptable there.
 
 > **Historical note, not a step.** The first channel-capable build had to be
 > Released in ToDesktop once, because installs predating the channel code read
