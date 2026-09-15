@@ -240,6 +240,21 @@ def test_a_page_that_never_goes_quiet_is_read_with_a_warning_that_it_had_not_set
     assert all(line.endswith(" ms") for line in observed.splitlines()), observed
 
 
+def test_a_ticking_page_whose_main_thread_stalls_is_still_read_as_changing(
+    local_browser: str, flow_lab_group: ConcurrencyGroup, tmp_path: Path
+) -> None:
+    # Once a second the page holds its main thread for 400ms, longer than the watch's quiet window,
+    # which is what a loaded machine does to a renderer it deschedules. Nothing runs meanwhile, so
+    # the clock's repaint falls overdue beside the watch's own tick; the page never stopped changing,
+    # and the watch must not read the stall as the page going quiet.
+    _opening, refreshed = _drive_todo(
+        local_browser, flow_lab_group, tmp_path, "?ticker=1&jank=400", [_click("Refresh")]
+    )
+
+    assert refreshed.is_ok, refreshed.detail
+    assert refreshed.reaction is StepReaction.STILL_CHANGING
+
+
 def test_an_add_the_app_silently_dedupes_shows_only_the_textbox_clearing(
     local_browser: str, flow_lab_group: ConcurrencyGroup, tmp_path: Path
 ) -> None:

@@ -104,7 +104,14 @@ only way harbor gets the dependencies it declares. Practical consequences:
   directory (or `just test-minds-evals`, which does it for you).
 - `just test-quick` / `just test-offload` skip this directory. This app's tests and type check run
   under `just test-minds-evals`, which the `test-minds-evals` CI job invokes on any PR touching this
-  app or the monorepo packages it depends on.
+  app or the monorepo packages it depends on. With no args it runs two pytest sessions, each
+  across two xdist workers and each held to CI's per-session time limit: the tests marked
+  `chromium` (every test using the `chromium_path` fixture, marked automatically) in one, the
+  rest of the suite in the other, with coverage combined across both. Given args (a path, a node
+  id, a `-m`) it runs the one session they select, on the same two workers; add `-n 0` to the
+  args to run it in-process, as `--pdb` and `-s` need. Tests run in parallel, so a test must not share
+  a fixed path, port or other process-wide state with another: take directories from `tmp_path`
+  and ports from the OS.
 - Type checking is split, because `imbue/minds_evals/resources/` and `imbue/minds_evals/templates/`
   are shipped as source into environments this project does not itself depend on. `resources/` runs
   in the box against the monorepo venv (importing `mngr_forward` and `playwright`) -- except the
@@ -1175,7 +1182,8 @@ milliseconds after the action (the shape of any framework that batches updates),
 answers every change with a "Saving..." status first and applies it that many milliseconds later
 (the shape of an app talking to a backend), `?arm_delete=1` makes delete a two-click control whose
 first click is acknowledged by a highlight and nothing else, `?dedupe=ci` drops a case-insensitive
-duplicate without saying so, `?ticker=1` keeps a clock repainting so the DOM never goes quiet, and
+duplicate without saying so, `?ticker=1` keeps a clock repainting so the DOM never goes quiet, `?jank=<ms>` holds the page's main
+thread busy for that long once a second (what a loaded machine does to a descheduled renderer), and
 `?unnamed=1` gives each task's checkbox no label association, so the tree lists it with no name and
 the ref is the only handle the page offers.
 Its "Start over" link is a real navigation, for the step that has to survive one -- immediately, or,
