@@ -7,6 +7,13 @@ verifier. It replaces a bespoke pre-harbor harness; every config that harness ac
 unchanged, and the schema is a superset of it: a config that adopts a goal entry (below) runs here
 only.
 
+The vocabulary this README uses (case, trial, arm, box, harbor step versus flow step, verifier
+versus verification agent, and the rest) is defined in the [glossary](docs/glossary.md). Keep it
+current in the same PR as the change: a new term gets an entry naming the module, class or key
+that carries it, a rename updates or retires its entry, and a word that acquires a second meaning
+goes into the glossary's collisions section. An entry marked *Earmarked* names a term already
+slated to change, so do not build new names on it.
+
 ## How a trial works
 
 1. The task's environment is a **box**: a full Minds computer (the adapted box Dockerfile plus a

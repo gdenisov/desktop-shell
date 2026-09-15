@@ -244,9 +244,12 @@ deploy was deliberately not done.
   The real `minds-v0.6.0` pair was cut on 2026-09-13 (mngr `5325e15e73`,
   dwt `96935db5b`; see [history/minds-v0.6.0.md](./history/minds-v0.6.0.md));
   the dev-josh-2 rows baked from the deleted provisional tags were destroyed
-  and the dev pool re-baked from the real tag. Still to do: cut further
-  0.6.x releases for the gen-2 cohort and keep 0.5.x stocked on gen-1 until
-  its create rate reads ~zero.
+  and the dev pool re-baked from the real tag. `minds-v0.6.1` was cut and
+  built on 2026-09-15 (mngr `0c9d81e7f6`, dwt `a87c68e19`, build
+  `260915wjcyd06bp`; see [history/minds-v0.6.1.md](./history/minds-v0.6.1.md))
+  but not baked, deployed or promoted anywhere yet. Still to do: rehearse
+  0.6.1 on staging, cut further 0.6.x releases for the gen-2 cohort and
+  keep 0.5.x stocked on gen-1 until its create rate reads ~zero.
 - [ ] **Production has no gen-2 box yet**, and the bake guard refuses
   `minds-v0.6.0` on gen-1 boxes, so it cannot hold 0.6.0 rows until its gen-2
   prerequisites land: the tier's `[ssh_ca]` committed (and dropped from the
