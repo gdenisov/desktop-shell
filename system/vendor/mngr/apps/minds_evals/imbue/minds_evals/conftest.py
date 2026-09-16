@@ -92,6 +92,23 @@ def harness_checks() -> ModuleType:
 
 
 @pytest.fixture(scope="session")
+def outcome_checks() -> ModuleType:
+    """The outcome dimension's programmatic criteria that ship into every generated dataset.
+
+    Importing it registers criteria for whatever `/tests/case.json` declares, which in a test run is
+    nothing at all -- so the module comes up with an empty registration and its scoring functions,
+    which take their inputs as arguments, can be exercised directly.
+    """
+    return load_template_module("outcome/checks.py", "minds_evals_outcome_checks")
+
+
+@pytest.fixture(scope="session")
+def expectations_renderer() -> ModuleType:
+    """The grade-time pre-step that renders the case's expectations for the outcome judge."""
+    return load_template_module("tests/verifier/render_expectations.py", "minds_evals_render_expectations")
+
+
+@pytest.fixture(scope="session")
 def finalize() -> ModuleType:
     """The reward-composition script that ships into every generated dataset."""
     return load_template_module("tests/verifier/finalize.py", "minds_evals_finalize")
