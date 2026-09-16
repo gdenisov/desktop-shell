@@ -10,6 +10,7 @@ tracks it, strictly: the day it passes, the mark comes off.
 import asyncio
 import json
 import os
+import struct
 from pathlib import Path
 
 import pytest
@@ -35,6 +36,19 @@ pytestmark = pytest.mark.timeout(120)
 _FLOW_LAB_APPS_DIR = Path(__file__).parent.parent.parent / "flow_lab_apps"
 _TODO_APP = _FLOW_LAB_APPS_DIR / "todo"
 _ADD_COMPLETE_DELETE_STEPS = "Add a task named 'walk dog'. Mark it complete. Delete 'walk dog'."
+
+
+def _frame_size(frame_path: Path) -> tuple[int, int]:
+    """The pixel dimensions a captured PNG declares, read from the header every PNG opens with."""
+    width, height = struct.unpack(">II", frame_path.read_bytes()[16:24])
+    return width, height
+
+
+def _launched_window_size() -> tuple[int, int]:
+    """The window size the flow browser's flags ask Chromium for."""
+    (size_flag,) = [flag for flag in flow_browser.CHROMIUM_LAUNCH_FLAGS if flag.startswith("--window-size=")]
+    width, height = size_flag.removeprefix("--window-size=").split(",")
+    return int(width), int(height)
 
 
 def _executor(cdp_endpoint_url: str, group: ConcurrencyGroup, tmp_path: Path) -> flow_lab.LocalFlowStepExecutor:
@@ -177,7 +191,18 @@ def test_opening_the_app_captures_its_seed_tasks_and_a_frame(
     assert opening.state_text.startswith("page http://127.0.0.1:")
     assert '"Buy milk"' in opening.state_text and '"Learn React"' in opening.state_text
     assert opening.screenshot_name == "step_000.png"
-    assert (tmp_path / "frames" / "step_000.png").stat().st_size > 0
+    frame_path = tmp_path / "frames" / "step_000.png"
+    assert frame_path.stat().st_size > 0
+    # A frame is the viewport, so its size follows the window the launch asks for, less whatever
+    # chrome the platform wraps that window in: macOS and Linux each take a different slice off the
+    # height, and Linux takes some off the width too. So what is pinned is that most of the
+    # asked-for window is there -- exact dimensions would pin whichever platform they were measured
+    # on -- which is enough to catch a launch that lost the size and fell back to a window less than
+    # half as wide.
+    window_width, window_height = _launched_window_size()
+    frame_width, frame_height = _frame_size(frame_path)
+    assert window_width * 0.9 < frame_width <= window_width
+    assert window_height / 2 < frame_height <= window_height
 
 
 def test_a_synchronous_render_is_captured_by_the_step_that_caused_it(
