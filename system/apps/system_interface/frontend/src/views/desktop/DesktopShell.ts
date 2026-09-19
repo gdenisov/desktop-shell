@@ -493,11 +493,25 @@ function closeWindow(tabId: string): void {
   const resolved = findInstance(closed.address);
   saveSoon();
   m.redraw();
-  if (resolved === null || !resolved.instance.stoppable) return;
+  if (resolved === null) return;
   // An app that lists its own instances (the chat app and its chat list) keeps them running:
   // its window is just a window, and stopping is the explicit verb in its own list. Closing a
   // chat mid-work must not stop the work.
   if (resolved.app.browses_instances) return;
+  // A single-program app (one window, no instances of its own) is its process: closing the
+  // window stops the program, so the memory goes with the window rather than the app living on
+  // in the dock. The desktop starts it again from its icon.
+  if (parseAddress(closed.address)?.key === "" && isAppStoppable(resolved.app)) {
+    closingAddresses.add(closed.address);
+    void setAppLifecycle(resolved.app.name, "stop")
+      .catch((e: Error) => console.warn(`[si] could not stop ${resolved.app.name}`, e))
+      .finally(() => {
+        closingAddresses.delete(closed.address);
+        m.redraw();
+      });
+    return;
+  }
+  if (!resolved.instance.stoppable) return;
   closingAddresses.add(closed.address);
   void stopUntilItSticks(resolved.app.name, resolved.instance.key, closed.address);
 }

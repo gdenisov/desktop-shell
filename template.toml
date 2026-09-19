@@ -10,7 +10,7 @@ slug = "desktop-shell"
 title = "Desktop Shell"
 description = "A desktop workspace UI: a rearrangeable icon grid, a dock that opens into search, windows with put-away tiles, and chats as pages with an instance rail."
 thumbnail = "template.svg"
-version = "v1"
+version = "v2"
 
 # How this template is DERIVED from the workspace it came from. An
 # update re-runs this recipe rather than diffing two repos, which is what

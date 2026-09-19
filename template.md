@@ -2,7 +2,7 @@
 title: "Desktop Shell"
 description: "A desktop workspace UI: a rearrangeable icon grid, a dock that opens into search, windows with put-away tiles, and chats as pages with an instance rail."
 thumbnail: "template.svg"
-version: v1
+version: v2
 format: v2
 ---
 
@@ -279,6 +279,8 @@ appends one entry per version (newest last); earlier entries are never rewritten
 This is distinct from "Adaptation history" below, which is the ADOPTERS' log.
 
 ### v1 (2026-09-18) -- the workspace UI rebuilt as a desktop: a rearrangeable icon grid, floating windows with a put-away dock, a `+` that opens into an apps-and-search field, and an instance rail that moves the chat list out of the chat app and onto the desktop.
+
+### v2 (2026-09-18) -- closing the window of an app that runs as a single program now stops that program, so the memory it holds goes away with the window rather than outliving it.
 
 ## Adaptation history
 
