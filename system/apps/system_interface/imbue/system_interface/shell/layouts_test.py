@@ -1,64 +1,36 @@
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
 
 import pytest
 
+from imbue.imbue_common.model_update import to_update
 from imbue.system_interface.shell.data_types import LayoutRecord
-from imbue.system_interface.shell.data_types import instance_panel_params_by_id
-from imbue.system_interface.shell.data_types import instance_panel_params_json
 from imbue.system_interface.shell.errors import StaleLayoutSaveError
 from imbue.system_interface.shell.layouts import LayoutStore
 from imbue.system_interface.shell.layouts import empty_layout
 from imbue.system_interface.shell.layouts import is_stale_save
 from imbue.system_interface.shell.layouts import rebind_tab_in_layout
-from imbue.system_interface.shell.layouts import strip_address_from_layout
-from imbue.system_interface.shell.layouts import strip_panel_from_dockview
+from imbue.system_interface.shell.layouts import strip_addresses_from_layout
 from imbue.system_interface.shell.layouts import unreferenced_addresses
 from imbue.system_interface.shell.primitives import Address
 from imbue.system_interface.shell.primitives import ClientId
 from imbue.system_interface.shell.primitives import DeviceKind
 from imbue.system_interface.shell.primitives import TabId
 from imbue.system_interface.shell.testing import TEST_NOW
-from imbue.system_interface.shell.testing import addresses_by_panel_id
+from imbue.system_interface.shell.testing import addresses_of_layout
+from imbue.system_interface.shell.testing import desktop_showing
+from imbue.system_interface.shell.testing import layout_showing
+from imbue.system_interface.shell.testing import page_id_for_test
 
 _FILES = Address("app:files")
 _TERMINAL_1 = Address("app:terminal?instance=terminal-1")
-_TAB_A = TabId("tab-000000000000000a")
-_TAB_B = TabId("tab-000000000000000b")
-
-
-def _dockview(*panel_ids: str, params_by_panel_id: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
-    params = params_by_panel_id or {}
-    return {
-        "grid": {
-            "root": {
-                "type": "branch",
-                "data": [{"type": "leaf", "data": {"views": list(panel_ids), "activeView": panel_ids[0]}}],
-            },
-            "orientation": "HORIZONTAL",
-        },
-        "panels": {
-            panel_id: ({"id": panel_id, "params": params[panel_id]} if panel_id in params else {"id": panel_id})
-            for panel_id in panel_ids
-        },
-        "activeGroup": "g1",
-    }
+_UNKNOWN_PAGE = TabId("tab-00000000000000ff")
 
 
 def _layout(device_kind: DeviceKind = DeviceKind.DESKTOP) -> LayoutRecord:
-    return LayoutRecord(
-        dockview=_dockview(
-            "p1",
-            "p2",
-            params_by_panel_id={
-                "p1": instance_panel_params_json(_FILES, _TAB_A, 10),
-                "p2": instance_panel_params_json(_TERMINAL_1, _TAB_B, 20),
-            },
-        ),
-        device_kind=device_kind,
-        updated_at=None,
-    )
+    """A desktop showing the two test instances, saved by a client on ``device_kind``."""
+    showing = layout_showing(_FILES, _TERMINAL_1)
+    return showing.model_copy_update(to_update(showing.field_ref().device_kind, device_kind))
 
 
 def test_read_falls_back_from_own_to_seed_to_empty(tmp_path: Path) -> None:
@@ -85,46 +57,43 @@ def test_all_client_layouts_skips_seeds_and_unreadable_files(tmp_path: Path) -> 
     assert store.referenced_addresses() == {_FILES, _TERMINAL_1}
 
 
-def test_tabs_are_found_and_rebound_by_id(tmp_path: Path) -> None:
+def test_pages_are_found_and_rebound_by_id(tmp_path: Path) -> None:
     store = LayoutStore(state_directory=tmp_path)
     store.save_browser_layout("everything", "c1", _layout(), None, TEST_NOW)
     store.save_browser_layout("alpha", "c1", _layout(), None, TEST_NOW)
-    assert [(str(found.stored.view_id), found.panel_id) for found in store.find_tab(_TAB_B)] == [
-        ("alpha", "p2"),
-        ("everything", "p2"),
-    ]
+    page = page_id_for_test(1)
+    assert [str(found.stored.view_id) for found in store.find_tab(page)] == ["alpha", "everything"]
     rebound = Address("app:terminal?instance=terminal-2")
-    rewritten = store.rebind_tab(_TAB_B, rebound, TEST_NOW)
+    rewritten = store.rebind_tab(page, rebound, TEST_NOW)
     assert {str(stored.view_id) for stored in rewritten} == {"alpha", "everything"}
-    rebound_params = instance_panel_params_by_id(store.read_layout("alpha", "c1", DeviceKind.DESKTOP).dockview)
-    assert rebound_params["p2"].address == rebound and rebound_params["p2"].tab_id == _TAB_B
-    # The rebind edits the address alone: the other keys of the params (the focus stamp here) stay as they were.
-    assert rebound_params["p2"].last_focused_ms == 20
-    assert store.find_tab(TabId("tab-00000000000000ff")) == []
-    # The seeds follow, so a client that arrives later starts from the rebound tab too.
-    assert addresses_by_panel_id(store.read_layout("alpha", "c9", DeviceKind.DESKTOP).dockview)["p2"] == rebound
+    layout = store.read_layout("alpha", "c1", DeviceKind.DESKTOP)
+    assert addresses_of_layout(layout) == [_FILES, rebound]
+    # The rebind moves the address alone: the window keeps its page and its place on the desktop.
+    assert layout.desktop is not None
+    rebound_window = layout.desktop.windows[1]
+    assert rebound_window.tab_id == page
+    assert rebound_window.rect == desktop_showing(_FILES, _TERMINAL_1).windows[1].rect
+    assert store.find_tab(_UNKNOWN_PAGE) == []
+    # The seeds follow, so a client that arrives later starts from the rebound window too.
+    assert addresses_of_layout(store.read_layout("alpha", "c9", DeviceKind.DESKTOP)) == [_FILES, rebound]
     untouched = _layout()
-    assert rebind_tab_in_layout(untouched, TabId("tab-00000000000000ff"), rebound) is untouched
+    assert rebind_tab_in_layout(untouched, _UNKNOWN_PAGE, rebound) is untouched
 
 
-def test_removed_addresses_leave_every_layout_and_its_grid(tmp_path: Path) -> None:
+def test_removed_addresses_leave_every_desktop(tmp_path: Path) -> None:
     store = LayoutStore(state_directory=tmp_path)
     store.save_browser_layout("everything", "c1", _layout(), None, TEST_NOW)
     rewritten = store.remove_addresses_everywhere([_TERMINAL_1], TEST_NOW)
     assert len(rewritten) == 1
-    layout = store.read_layout("everything", "c1", DeviceKind.DESKTOP)
-    assert set(addresses_by_panel_id(layout.dockview)) == {"p1"}
-    assert layout.dockview is not None
-    assert set(layout.dockview["panels"]) == {"p1"}
-    assert layout.dockview["grid"]["root"]["data"][0]["data"]["views"] == ["p1"]
-    # Removing the last panel leaves the empty layout rather than a grid with nothing in it.
+    assert addresses_of_layout(store.read_layout("everything", "c1", DeviceKind.DESKTOP)) == [_FILES]
+    # Removing the last window leaves the desktop itself, which still carries the icons and the dock.
     store.remove_addresses_everywhere([_FILES], TEST_NOW)
     emptied = store.read_layout("everything", "c1", DeviceKind.DESKTOP)
-    assert emptied.dockview is None
+    assert emptied.desktop is not None and emptied.desktop.windows == ()
     # Nothing to remove rewrites nothing.
     assert store.remove_addresses_everywhere([_FILES], TEST_NOW) == []
     # The seed was stripped too, rather than overwritten with a client's layout.
-    assert store.read_layout("everything", "c9", DeviceKind.DESKTOP).dockview is None
+    assert addresses_of_layout(store.read_layout("everything", "c9", DeviceKind.DESKTOP)) == []
 
 
 def test_a_browser_save_is_refused_when_the_stored_arrangement_is_newer(tmp_path: Path) -> None:
@@ -133,7 +102,7 @@ def test_a_browser_save_is_refused_when_the_stored_arrangement_is_newer(tmp_path
     assert first is not None
     later = TEST_NOW + timedelta(seconds=5)
     # The shell edited the file after the window fetched it.
-    store.write_client_layout("everything", "c1", strip_address_from_layout(_layout(), _FILES), later)
+    store.write_client_layout("everything", "c1", strip_addresses_from_layout(_layout(), [_FILES]), later)
     with pytest.raises(StaleLayoutSaveError):
         store.save_browser_layout("everything", "c1", _layout(), TEST_NOW, later + timedelta(seconds=1))
     # A window that fetched the newer arrangement may save over it.
@@ -160,22 +129,22 @@ def test_an_edit_reads_the_stored_arrangement_at_the_write_and_skips_a_change_of
 
     def drop_files(layout: LayoutRecord) -> LayoutRecord:
         seen.append(layout)
-        return strip_address_from_layout(layout, _FILES)
+        return strip_addresses_from_layout(layout, [_FILES])
 
     # A client with no arrangement of the view starts from the seed of its device kind, then from its own file.
     store.save_browser_layout("everything", "seed-maker", _layout(), None, TEST_NOW)
     first = store.edit_client_layout(
         "everything", "c1", DeviceKind.DESKTOP, drop_files, TEST_NOW + timedelta(seconds=1)
     )
-    assert first.is_written is True and set(addresses_by_panel_id(first.layout.dockview)) == {"p2"}
-    assert addresses_by_panel_id(seen[0].dockview).keys() == {"p1", "p2"}
+    assert first.is_written is True and addresses_of_layout(first.layout) == [_TERMINAL_1]
+    assert addresses_of_layout(seen[0]) == [_FILES, _TERMINAL_1]
     assert store.read_client_layout("everything", "c1") == first.layout
     # The edit is handed what is stored when it runs, not an earlier snapshot: a browser save in between is what it sees.
     store.save_browser_layout("everything", "c1", _layout(), first.layout.updated_at, TEST_NOW + timedelta(seconds=2))
     second = store.edit_client_layout(
         "everything", "c1", DeviceKind.DESKTOP, drop_files, TEST_NOW + timedelta(seconds=3)
     )
-    assert addresses_by_panel_id(seen[-1].dockview).keys() == {"p1", "p2"} and second.is_written is True
+    assert addresses_of_layout(seen[-1]) == [_FILES, _TERMINAL_1] and second.is_written is True
     # An edit that changes nothing is neither written nor stamped.
     third = store.edit_client_layout(
         "everything", "c1", DeviceKind.DESKTOP, drop_files, TEST_NOW + timedelta(seconds=4)
@@ -187,24 +156,16 @@ def test_an_edit_reads_the_stored_arrangement_at_the_write_and_skips_a_change_of
 def test_the_shells_own_write_leaves_the_seed_alone(tmp_path: Path) -> None:
     store = LayoutStore(state_directory=tmp_path)
     store.save_browser_layout("everything", "c1", _layout(), None, TEST_NOW)
-    edited = strip_address_from_layout(_layout(), _FILES)
+    edited = strip_addresses_from_layout(_layout(), [_FILES])
     written = store.write_client_layout("everything", "c1", edited, TEST_NOW + timedelta(seconds=1))
-    assert set(addresses_by_panel_id(written.dockview)) == {"p2"}
+    assert addresses_of_layout(written) == [_TERMINAL_1]
     assert store.read_client_layout("everything", "c1") == written
     assert store.read_client_layout("everything", "c9") is None
-    assert set(addresses_by_panel_id(store.read_layout("everything", "c9", DeviceKind.DESKTOP).dockview)) == {
-        "p1",
-        "p2",
-    }
+    assert addresses_of_layout(store.read_layout("everything", "c9", DeviceKind.DESKTOP)) == [_FILES, _TERMINAL_1]
 
 
-def test_strip_helpers_are_pure_over_the_dockview_shape() -> None:
-    dockview = _dockview("p1", "p2")
-    stripped = strip_panel_from_dockview(dockview, "p1")
-    assert stripped is not None
-    assert stripped["grid"]["root"]["data"][0]["data"] == {"views": ["p2"], "activeView": "p2"}
-    assert strip_panel_from_dockview(_dockview("p1"), "p1") is None
-    untouched = strip_address_from_layout(_layout(), Address("app:browser"))
+def test_stripping_an_address_nothing_shows_changes_nothing() -> None:
+    untouched = strip_addresses_from_layout(_layout(), [Address("app:browser")])
     assert untouched == _layout()
     assert unreferenced_addresses([_FILES, _TERMINAL_1], {_FILES}) == [_TERMINAL_1]
 

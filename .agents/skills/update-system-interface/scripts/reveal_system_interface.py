@@ -86,6 +86,12 @@ PREVIEW_HOST_ENV = "SYSTEM_INTERFACE_HOST"
 # The shell's own probe route (contracts.md section 5): a 200 there says the
 # backend is serving; handed to the shared preview script as its ``--health-path``.
 HEALTH_PATH = "/api/health"
+# The live app registry, as the shell resolves it (``app_manifest.registry``): relative to the
+# cwd unless this variable points elsewhere. The preview boots from the worker's app dir, where
+# there is no registry, so it is pointed at the served tree's -- otherwise the preview lists no
+# apps at all, and the user sees an empty desktop instead of their real chats.
+ENV_APPS_FILE = "MINDS_APPS_FILE"
+LIVE_APPS_FILE = "data/.state/apps.toml"
 
 
 class Runner:
@@ -183,6 +189,8 @@ def preview(slug: str, work_dir: str, repo_root: Path, *, runner: Runner) -> int
             PREVIEW_HOST_ENV,
             "--unset-env",
             ENV_MNGR_AGENT_ID,
+            "--env",
+            f"{ENV_APPS_FILE}={(repo_root / LIVE_APPS_FILE).resolve()}",
             "--health-path",
             HEALTH_PATH,
             "--service-name",

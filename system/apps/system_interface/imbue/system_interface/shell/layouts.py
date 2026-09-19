@@ -1,4 +1,4 @@
-"""Client layouts: one arrangement per view per client, plus a seed per device kind (contracts.md sections 6 and 7).
+"""Client layouts: one desktop per view per client, plus a seed per device kind (contracts.md sections 6 and 7).
 
 The client's layout file is the truth of the arrangement. A browser writes it through
 ``save_browser_layout`` for the user's own gestures (and that write alone rewrites the seed of
@@ -22,11 +22,12 @@ from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.mutable_model import MutableModel
 from imbue.imbue_common.pure import pure
-from imbue.system_interface.shell.data_types import InstancePanelParams
 from imbue.system_interface.shell.data_types import LayoutEditOutcome
 from imbue.system_interface.shell.data_types import LayoutRecord
-from imbue.system_interface.shell.data_types import instance_panel_params_by_id
-from imbue.system_interface.shell.data_types import with_panel_params_address
+from imbue.system_interface.shell.data_types import windows_of
+from imbue.system_interface.shell.desktop_document import DesktopWindow
+from imbue.system_interface.shell.desktop_document import rebind_tab_in_document
+from imbue.system_interface.shell.desktop_document import without_addresses
 from imbue.system_interface.shell.errors import StaleLayoutSaveError
 from imbue.system_interface.shell.primitives import Address
 from imbue.system_interface.shell.primitives import ClientId
@@ -51,16 +52,15 @@ class StoredLayout(FrozenModel):
 
 
 class FoundTab(FrozenModel):
-    """One panel showing a tab, with the layout file that holds it and the params that named the tab."""
+    """One window showing a page, with the layout file that holds it."""
 
-    stored: StoredLayout = Field(description="The layout file the panel is in")
-    panel_id: str = Field(description="The dockview panel id")
-    params: InstancePanelParams = Field(description="The panel's params, as read from the file")
+    stored: StoredLayout = Field(description="The layout file the window is in")
+    window: DesktopWindow = Field(description="The window, as read from the file")
 
 
 @pure
 def empty_layout(device_kind: DeviceKind) -> LayoutRecord:
-    return LayoutRecord(dockview=None, device_kind=device_kind, updated_at=None)
+    return LayoutRecord(desktop=None, device_kind=device_kind, updated_at=None)
 
 
 @pure
@@ -70,100 +70,30 @@ def layout_wire_json(layout: LayoutRecord) -> dict[str, Any]:
 
 @pure
 def is_same_arrangement(first: LayoutRecord, second: LayoutRecord) -> bool:
-    """Whether two layouts arrange the same panels the same way (the stamp and device kind aside)."""
-    return first.dockview == second.dockview
-
-
-@pure
-def _pruned_grid_node(node: dict[str, Any], panel_id: str) -> dict[str, Any] | None:
-    """Drop ``panel_id`` from one grid node, or None when the node empties out."""
-    node_type = node.get("type")
-    if node_type == "leaf":
-        data = node.get("data")
-        if not isinstance(data, dict):
-            return node
-        views = [view for view in data.get("views", []) if view != panel_id]
-        if not views:
-            return None
-        pruned_data = {**data, "views": views}
-        if pruned_data.get("activeView") == panel_id:
-            pruned_data["activeView"] = views[0]
-        return {**node, "data": pruned_data}
-    if node_type == "branch":
-        children = node.get("data")
-        if not isinstance(children, list):
-            return node
-        pruned_children = [
-            pruned for pruned in (_pruned_grid_node(child, panel_id) for child in children) if pruned is not None
-        ]
-        if not pruned_children:
-            return None
-        return {**node, "data": pruned_children}
-    return node
-
-
-@pure
-def strip_panel_from_dockview(dockview: dict[str, Any], panel_id: str) -> dict[str, Any] | None:
-    """Remove one panel from a serialized dockview grid, or None when nothing is left.
-
-    The panel leaves ``panels`` and whichever group holds it; a group that empties collapses
-    away, and a grid that empties answers None so the caller can drop the arrangement outright.
-    """
-    panels = dockview.get("panels")
-    pruned_panels = (
-        {key: value for key, value in panels.items() if key != panel_id} if isinstance(panels, dict) else panels
-    )
-    if isinstance(pruned_panels, dict) and not pruned_panels:
-        return None
-    pruned: dict[str, Any] = {**dockview, "panels": pruned_panels}
-    grid = dockview.get("grid")
-    if isinstance(grid, dict):
-        root = grid.get("root")
-        pruned_root = _pruned_grid_node(root, panel_id) if isinstance(root, dict) else root
-        if pruned_root is None:
-            return None
-        pruned["grid"] = {**grid, "root": pruned_root}
-    return pruned
-
-
-@pure
-def strip_address_from_layout(layout: LayoutRecord, address: Address) -> LayoutRecord:
-    """The layout without every panel showing ``address``; a grid that empties out leaves ``dockview`` None."""
-    doomed_panel_ids = [
-        panel_id
-        for panel_id, params in instance_panel_params_by_id(layout.dockview).items()
-        if params.address == address
-    ]
-    if not doomed_panel_ids:
-        return layout
-    dockview = layout.dockview
-    for panel_id in doomed_panel_ids:
-        if dockview is not None:
-            dockview = strip_panel_from_dockview(dockview, panel_id)
-    return layout.model_copy_update(to_update(layout.field_ref().dockview, dockview))
+    """Whether two layouts hold the same desktop (the stamp and device kind aside)."""
+    return first.desktop == second.desktop
 
 
 @pure
 def strip_addresses_from_layout(layout: LayoutRecord, addresses: Sequence[Address]) -> LayoutRecord:
-    """The layout without every panel showing any of ``addresses``; the same object when none is shown."""
-    stripped = layout
-    for address in addresses:
-        stripped = strip_address_from_layout(stripped, address)
-    return stripped
+    """The layout without the windows showing any of ``addresses``; the same object when it shows none."""
+    if layout.desktop is None:
+        return layout
+    stripped = without_addresses(layout.desktop, addresses)
+    if stripped is layout.desktop:
+        return layout
+    return layout.model_copy_update(to_update(layout.field_ref().desktop, stripped))
 
 
 @pure
 def rebind_tab_in_layout(layout: LayoutRecord, tab_id: TabId, address: Address) -> LayoutRecord:
-    """The layout with every panel whose params carry ``tab_id`` pointed at ``address``; the same object when none does."""
-    if layout.dockview is None:
+    """The layout with the window carrying ``tab_id`` pointed at ``address``; the same object when none does."""
+    if layout.desktop is None:
         return layout
-    dockview = layout.dockview
-    for panel_id, params in instance_panel_params_by_id(layout.dockview).items():
-        if params.tab_id == tab_id and params.address != address:
-            dockview = with_panel_params_address(dockview, panel_id, address)
-    if dockview is layout.dockview:
+    rebound = rebind_tab_in_document(layout.desktop, tab_id, address)
+    if rebound is layout.desktop:
         return layout
-    return layout.model_copy_update(to_update(layout.field_ref().dockview, dockview))
+    return layout.model_copy_update(to_update(layout.field_ref().desktop, rebound))
 
 
 @pure
@@ -303,18 +233,16 @@ class LayoutStore(MutableModel):
 
     def referenced_addresses(self) -> set[Address]:
         return {
-            params.address
-            for stored in self.all_client_layouts()
-            for params in instance_panel_params_by_id(stored.layout.dockview).values()
+            window.address for stored in self.all_client_layouts() for window in windows_of(stored.layout)
         }
 
     def find_tab(self, tab_id: TabId) -> list[FoundTab]:
-        """Every panel whose params carry ``tab_id``, with the params as read so a caller need not parse again."""
+        """Every window carrying ``tab_id``, with the window as read so a caller need not parse again."""
         found: list[FoundTab] = []
         for stored in self.all_client_layouts():
-            for panel_id, params in instance_panel_params_by_id(stored.layout.dockview).items():
-                if params.tab_id == tab_id:
-                    found.append(FoundTab(stored=stored, panel_id=panel_id, params=params))
+            for window in windows_of(stored.layout):
+                if window.tab_id == tab_id:
+                    found.append(FoundTab(stored=stored, window=window))
         return found
 
     def _rewrite_seeds(self, transform: Callable[[LayoutRecord], LayoutRecord], now: datetime) -> None:

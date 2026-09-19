@@ -4,9 +4,14 @@ from collections.abc import Mapping
 from app_manifest.primitives import ActionId
 from imbue.imbue_common.mutable_model import MutableModel
 
-from app_instances.data_types import InstanceRecord
-from app_instances.errors import NotStoppableError
-from app_instances.primitives import InstanceKey, InstanceTitle, LocationTarget
+from app_instances.data_types import InstanceMatch, InstanceRecord
+from app_instances.errors import NotStoppableError, SearchNotSupportedError
+from app_instances.primitives import (
+    InstanceKey,
+    InstanceTitle,
+    LocationTarget,
+    SearchQuery,
+)
 
 
 class InstanceSourceInterface(MutableModel, ABC):
@@ -48,6 +53,16 @@ class InstanceSourceInterface(MutableModel, ABC):
     def start_instance(self, key: InstanceKey) -> InstanceRecord:
         """Bring a stopped instance back, answering its record; a no-op for one already running. Raises NotStoppableError, UnknownInstanceError, or InstanceConflictError (it cannot be started right now)."""
         raise NotStoppableError("this app's instances cannot be started on their own")
+
+    # Searching inside instances is optional, and an app that offers it declares
+    # ``instance_search`` in its manifest so the shell knows to ask. The shell searches every
+    # instance's title itself, from the list it already holds; this is for what is *inside* one,
+    # which only the app can see.
+    def search_instances(
+        self, query: SearchQuery, max_match_count: int
+    ) -> list[InstanceMatch]:
+        """The instances whose own content matches, best first, at most ``max_match_count``. Raises SearchNotSupportedError when the app does not search."""
+        raise SearchNotSupportedError("this app does not search inside its instances")
 
 
 class InstanceNudgerInterface(MutableModel, ABC):

@@ -1,9 +1,17 @@
 # The chat app: the agent harness UI. Its pages render inside iframes at this origin, served
 # by the ``chat`` program at its own port (docs/system/blueprint/workspace-app-model/).
 name = "chat"
-display_name = "Chat"
+# Plural: the icon opens the list of chats, and a window of it browses all of them. Individual
+# chats are still named "Chat 1", "Chat 2" and so on -- that word is ``naming.AUTO_NAME_WORD``.
+display_name = "Chats"
 icon = "icon.svg"
 instances = true
+# The desktop's search asks this app what was said inside a chat; the shell matches titles itself.
+instance_search = true
+# A chat's page lists every chat down its side, so the workspace leaves them to it: the dock
+# carries one tile per chat WINDOW rather than one per chat running, which is what kept a dozen
+# chats from crowding everything else out of it.
+browses_instances = true
 critical = true
 priority = "chat"
 launcher_rank = 10

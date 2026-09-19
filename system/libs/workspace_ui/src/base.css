@@ -43,8 +43,8 @@
      stack: a control's hover tint over an already-tinted row reads one step
      deeper, which is what keeps a hover-revealed control's own hover visible.
      Warmth comes from the surface underneath, not the tint. */
-  --c-fill-hover: rgb(0 0 0 / 0.07);
-  --c-fill-active: rgb(0 0 0 / 0.11);
+  --c-fill-hover: rgb(0 0 0 / 0.035);
+  --c-fill-active: rgb(0 0 0 / 0.055);
   --c-bg-user-bubble: #ededed;
   --c-bg-composer: #ffffff;
   --c-bg-chat: #ffffff;
@@ -56,6 +56,8 @@
   --c-border-faint: #efeeeb;
   --c-border-code: #e0e0e0;
   --c-accent: #2f6b4f;
+  /* Activity in progress: a blue apart from the accent's green, so "working" is not "done". */
+  --c-info: #2f6fb6;
   --c-accent-hover: #24573f;
   --c-accent-light: #e9f2ee;
   --c-surface: #ffffff;
@@ -136,6 +138,7 @@
   --color-fill-active: var(--c-fill-active);
   /* accent / interactive */
   --color-accent: var(--c-accent);
+  --color-info: var(--c-info);
   --color-accent-hover: var(--c-accent-hover);
   --color-accent-light: var(--c-accent-light);
   --color-stop: var(--c-stop-button);

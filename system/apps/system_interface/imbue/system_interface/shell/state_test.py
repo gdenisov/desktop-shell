@@ -10,7 +10,6 @@ from app_instances.testing import wait_until
 from imbue.imbue_common.model_update import to_update
 from imbue.system_interface.shell.clients import CLIENT_RETENTION
 from imbue.system_interface.shell.data_types import ClientStateReport
-from imbue.system_interface.shell.data_types import instance_panel_params_by_id
 from imbue.system_interface.shell.inventory import HttpInstanceFetcher
 from imbue.system_interface.shell.primitives import Address
 from imbue.system_interface.shell.primitives import ClientId
@@ -19,6 +18,7 @@ from imbue.system_interface.shell.primitives import ViewId
 from imbue.system_interface.shell.state import ShellState
 from imbue.system_interface.shell.state import build_shell_state
 from imbue.system_interface.shell.testing import TEST_NOW
+from imbue.system_interface.shell.testing import addresses_of_layout
 from imbue.system_interface.shell.testing import build_inventory
 from imbue.system_interface.shell.testing import instance_record
 from imbue.system_interface.shell.testing import layout_showing
@@ -109,7 +109,7 @@ def test_an_instance_its_app_stops_listing_keeps_its_tabs_and_layouts_until_it_i
 
         assert shell.projects.get_project("alpha").tabs == (_STUB_1, _STUB_2)
         kept = shell.layouts.read_layout("alpha", "c1", DeviceKind.DESKTOP)
-        assert set(instance_panel_params_by_id(kept.dockview)) == {"p0", "p1"}
+        assert addresses_of_layout(kept) == [_STUB_1, _STUB_2]
 
         stub_source.records.append(instance_record("stub-1"))
         shell.inventory.refetch_now("stub")

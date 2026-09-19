@@ -3,7 +3,7 @@
 ``system/scripts/layout.py`` posts ``{op, args, requester}`` to ``POST /api/layout/broadcast``
 (``routes.py``): the read ops (``inspect``, ``context``) are answered from the state files and the
 client-activity log, ``load`` switches a client's view, the document ops are applied by the shell to
-the target client's layout file (``dockview_document.py``), and the transient ops are sent to that
+the target client's desktop (``desktop_document.py``), and the transient ops are sent to that
 client's windows. The script's ``list`` and ``views`` read ``GET /api/inventory`` instead. This module
 holds the op tables, the op arguments, and the pure summary ``inspect`` answers with.
 """
@@ -17,9 +17,10 @@ from pydantic import Field
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.pure import pure
 from imbue.system_interface.shell.data_types import LayoutRecord
-from imbue.system_interface.shell.data_types import instance_panel_params_by_id
-from imbue.system_interface.shell.dockview_document import DEFAULT_SPLIT_RATIO
-from imbue.system_interface.shell.dockview_document import Direction
+from imbue.system_interface.shell.data_types import windows_of
+from imbue.system_interface.shell.desktop_document import DEFAULT_SPLIT_RATIO
+from imbue.system_interface.shell.desktop_document import Direction
+from imbue.system_interface.shell.desktop_document import desktop_size_of
 
 # The ops the endpoint dispatches on. Anything else is a 400.
 READ_OPS: Final[frozenset[str]] = frozenset({"inspect", "context"})
@@ -74,72 +75,39 @@ class DocumentOpArguments(FrozenModel):
         default="", description="The instance or app the op names; ``self`` for the requester's own instance"
     )
     relative_to: str = Field(default=SELF_ADDRESS, description="The anchor of a split or a move")
-    direction: Direction = Field(default=Direction.RIGHT, description="Where a split or a move lands")
-    ratio: float = Field(default=DEFAULT_SPLIT_RATIO, description="The share of the anchor a split takes")
-    new_group: bool = Field(default=False, description="Split even when a group already lies in the direction")
+    direction: Direction = Field(default=Direction.RIGHT, description="Which side of the anchor a split or a move takes")
+    ratio: float = Field(default=DEFAULT_SPLIT_RATIO, description="The share of the desktop the placed window takes")
+    # Kept so an older ``layout.py`` and every existing caller still parse. A desktop has no
+    # groups to open a panel into, so a tiling gesture is what a split is either way.
+    new_group: bool = Field(default=False, description="Accepted and ignored: the desktop has no tab groups")
     action: str = Field(default="", description="The action a create runs; empty for the app's primary action")
     params: dict[str, str] = Field(default_factory=dict, description="The create's params")
 
 
 @pure
-def _orthogonal_orientation(orientation: str) -> str:
-    return "VERTICAL" if orientation == "HORIZONTAL" else "HORIZONTAL"
-
-
-@pure
-def _serialize_grid_node(
-    node: dict[str, Any],
-    panel_by_id: Mapping[str, dict[str, Any]],
-    orientation: str,
-) -> dict[str, Any]:
-    """Project the dockview grid tree into a compact summary; nested branches alternate orientation."""
-    if node.get("type") == "leaf":
-        data = node.get("data", {}) or {}
-        active_view = data.get("activeView")
-        panels = [
-            {
-                **panel_by_id.get(panel_id, {"address": None, "tab_id": None, "title": None}),
-                "active": panel_id == active_view,
-            }
-            for panel_id in list(data.get("views", []) or [])
-        ]
-        return {"type": "leaf", "size_ratio": data.get("size"), "panels": panels}
-    children = node.get("data", []) or []
-    return {
-        "type": "branch",
-        "arrangement": "row" if orientation == "HORIZONTAL" else "column",
-        "size_ratio": node.get("size"),
-        "children": [
-            _serialize_grid_node(child, panel_by_id, _orthogonal_orientation(orientation)) for child in children
-        ],
-    }
-
-
-@pure
 def layout_inspect(layout: LayoutRecord | None, title_by_address: Mapping[str, str]) -> dict[str, Any]:
-    """A client's arrangement as the ``inspect`` op reports it: the panels with their addresses, and the grid tree."""
-    if layout is None or layout.dockview is None:
-        return {"active_panel": None, "panels": [], "tree": None}
-    panel_by_id = {
-        panel_id: {
-            "address": str(params.address),
-            "tab_id": str(params.tab_id),
-            "title": title_by_address.get(str(params.address)),
-        }
-        for panel_id, params in instance_panel_params_by_id(layout.dockview).items()
-    }
-    dockview = layout.dockview
-    grid = dockview.get("grid", {}) or {}
-    root = grid.get("root")
-    tree = (
-        _serialize_grid_node(root, panel_by_id, grid.get("orientation") or "HORIZONTAL")
-        if isinstance(root, dict)
-        else None
-    )
+    """A client's desktop as the ``inspect`` op reports it: every window, bottom of the stack first.
+
+    A window whose instance no longer appears in any app's list keeps its window and is reported
+    under the title it last had, so an agent reading this sees what the user sees rather than a
+    nameless row.
+    """
+    if layout is None or layout.desktop is None:
+        return {"desktop_size": None, "windows": []}
+    desktop_size = desktop_size_of(layout.desktop)
     return {
-        "active_panel": dockview.get("activeGroup"),
-        "panels": [
-            panel_by_id[panel_id] for panel_id in (dockview.get("panels", {}) or {}) if panel_id in panel_by_id
+        "desktop_size": desktop_size.model_dump(mode="json"),
+        "windows": [
+            {
+                "address": str(window.address),
+                "tab_id": str(window.tab_id),
+                "title": title_by_address.get(str(window.address)) or window.last_known_title,
+                "rect": window.rect.model_dump(mode="json"),
+                "is_minimized": window.is_minimized,
+                "is_maximized": window.is_maximized,
+                # The list is the stacking order, so the last window named is the one on top.
+                "is_on_top": index == len(windows_of(layout)) - 1,
+            }
+            for index, window in enumerate(windows_of(layout))
         ],
-        "tree": tree,
     }

@@ -808,6 +808,15 @@ def running_workspace(
         )
     write_registry(registry_path, *rows)
 
+    # mngr refuses to run inside pytest from a config that has not opted in, and the account
+    # commit below writes this workspace's create defaults into exactly that file -- so without
+    # the opt-in seeded first, every real ``mngr`` this workspace shells out to (a rename, a
+    # destroy) aborts with a config error rather than doing its job. The managed keys are
+    # rewritten around anything else in the file, so the opt-in survives the account commit.
+    project_config_dir = tmp_path / "project-config"
+    project_config_dir.mkdir(parents=True, exist_ok=True)
+    (project_config_dir / "settings.local.toml").write_text("is_allowed_in_pytest = true\n")
+
     with (
         patch.dict(
             os.environ,

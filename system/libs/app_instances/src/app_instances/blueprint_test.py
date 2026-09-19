@@ -3,12 +3,14 @@ from app_manifest.primitives import ActionId
 from flask.testing import FlaskClient
 
 from app_instances.blueprint import (
+    DEFAULT_MATCH_COUNT,
     HTTP_BAD_REQUEST,
     HTTP_CONFLICT,
     HTTP_CREATED,
     HTTP_INTERNAL_ERROR,
     HTTP_NOT_FOUND,
     HTTP_SERVICE_UNAVAILABLE,
+    MAX_MATCH_COUNT,
     build_instances_app,
     status_code_for_error,
 )
@@ -40,6 +42,7 @@ def test_the_instances_app_serves_only_the_contract_routes() -> None:
 
     assert {rule.rule for rule in app.url_map.iter_rules()} == {
         "/_instances",
+        "/_instances/search",
         "/_instances/<key>",
         "/_instances/<key>/rename",
         "/_instances/<key>/location",
@@ -375,3 +378,61 @@ def test_status_code_for_error_follows_the_contract(
     error: AppInstancesError, expected_status: int
 ) -> None:
     assert status_code_for_error(error) == expected_status
+
+
+# ---------- the optional instance-search capability (contracts.md section 4.4) ----------
+
+
+def test_an_app_that_does_not_search_refuses_the_search_route(instances_client: FlaskClient) -> None:
+    refused = instances_client.get("/_instances/search?q=anything")
+    assert refused.status_code == 400
+    assert "search" in refused.get_json()["detail"]
+
+
+def test_search_answers_the_matches_its_source_found(
+    instances_client: FlaskClient, stub_source: StubInstanceSource, recording_nudger: RecordingNudger
+) -> None:
+    stub_source.is_searchable = True
+    stub_source.snippet_by_key = {
+        "stub-1": "the part where we talked about the DOCK",
+        "stub-2": "nothing of interest",
+    }
+
+    found = instances_client.get("/_instances/search?q=dock")
+
+    assert found.status_code == 200
+    assert found.get_json() == {
+        "matches": [{"key": "stub-1", "snippet": "the part where we talked about the DOCK"}]
+    }
+    # A read never nudges the shell.
+    assert recording_nudger.nudge_count == 0
+
+
+def test_search_holds_its_query_and_its_limit_to_what_the_route_takes(
+    instances_client: FlaskClient, stub_source: StubInstanceSource
+) -> None:
+    stub_source.is_searchable = True
+    stub_source.snippet_by_key = {f"stub-{index}": "match me" for index in range(1, 6)}
+
+    assert instances_client.get("/_instances/search?q=").status_code == 400
+    assert instances_client.get("/_instances/search?q=%20%20").status_code == 400
+    assert instances_client.get("/_instances/search?q=match&limit=nope").status_code == 400
+    assert instances_client.get("/_instances/search?q=match&limit=0").status_code == 400
+
+    limited = instances_client.get("/_instances/search?q=match&limit=2")
+    assert [match["key"] for match in limited.get_json()["matches"]] == ["stub-1", "stub-2"]
+    # The default is asked for when no limit is given, and a huge one is held to the ceiling.
+    instances_client.get("/_instances/search?q=match")
+    instances_client.get("/_instances/search?q=match&limit=9999")
+    assert stub_source.calls[-2:] == [
+        f"search:match:{DEFAULT_MATCH_COUNT}",
+        f"search:match:{MAX_MATCH_COUNT}",
+    ]
+
+
+def test_a_search_while_the_app_is_still_starting_is_unavailable(
+    instances_client: FlaskClient, stub_source: StubInstanceSource
+) -> None:
+    stub_source.is_searchable = True
+    stub_source.is_ready = False
+    assert instances_client.get("/_instances/search?q=anything").status_code == 503

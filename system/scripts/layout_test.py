@@ -133,9 +133,16 @@ def test_open_waits_for_registration_then_posts_the_address(
 ) -> None:
     posted: list[tuple[str, dict[str, Any]]] = []
     docked = {
-        "active_panel": "g1",
-        "panels": [{"address": "app:files", "tab_id": "tab-1", "title": "Files"}],
-        "tree": {"type": "leaf", "panels": [{"address": "app:files", "active": True}]},
+        "desktop_size": {"width": 1440, "height": 900},
+        "windows": [
+            {
+                "address": "app:files",
+                "tab_id": "tab-1",
+                "title": "Files",
+                "rect": {"x": 120, "y": 72, "width": 900, "height": 620},
+                "is_on_top": True,
+            }
+        ],
     }
     monkeypatch.setattr(
         layout,
@@ -154,6 +161,9 @@ def test_open_waits_for_registration_then_posts_the_address(
             {
                 "address": "app:files",
                 "new_group": True,
+                "relative_to": "self",
+                "direction": "right",
+                "ratio": 0.5,
                 "view": "Research",
                 "client": "c9",
             },
@@ -161,7 +171,7 @@ def test_open_waits_for_registration_then_posts_the_address(
     ]
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "opened app:files in tabs=[app:files*]\n"
+    assert captured.err == "opened app:files in windows=[app:files]\n"
 
 
 def test_open_of_an_app_or_a_url_creates_inside_the_op_and_prints_the_new_address(
@@ -175,18 +185,22 @@ def test_open_of_an_app_or_a_url_creates_inside_the_op_and_prints_the_new_addres
         "ok": True,
         "created_address": created,
         "layout": {
-            "active_panel": "g1",
-            "panels": [
-                {"address": older, "tab_id": "tab-1", "title": "Terminal 1"},
-                {"address": created, "tab_id": "tab-2", "title": "Terminal 2"},
+            "desktop_size": {"width": 1440, "height": 900},
+            "windows": [
+                {
+                    "address": older,
+                    "tab_id": "tab-1",
+                    "title": "Terminal 1",
+                    "rect": {"x": 120, "y": 72, "width": 900, "height": 620},
+                },
+                {
+                    "address": created,
+                    "tab_id": "tab-2",
+                    "title": "Terminal 2",
+                    "rect": {"x": 150, "y": 102, "width": 900, "height": 620},
+                    "is_on_top": True,
+                },
             ],
-            "tree": {
-                "type": "leaf",
-                "panels": [
-                    {"address": older, "active": False},
-                    {"address": created, "active": True},
-                ],
-            },
         },
     }
     monkeypatch.setattr(layout, "_post_layout", _make_fake_post(posted, (200, answer)))
@@ -196,13 +210,16 @@ def test_open_of_an_app_or_a_url_creates_inside_the_op_and_prints_the_new_addres
     )
     captured = capsys.readouterr()
     assert captured.out == f"{created}\n"
-    assert f"opened {created} in tabs=[{older}, {created}*]" in captured.err
+    assert f"opened {created} in windows=[{older}, {created}]" in captured.err
     assert posted == [
         (
             "open",
             {
                 "address": "app:terminal",
                 "new_group": False,
+                "relative_to": "self",
+                "direction": "right",
+                "ratio": 0.5,
                 "action": "new",
                 "params": {"workdir": "/data"},
             },
@@ -219,6 +236,9 @@ def test_open_of_an_app_or_a_url_creates_inside_the_op_and_prints_the_new_addres
         {
             "address": "app:browser",
             "new_group": False,
+            "relative_to": "self",
+            "direction": "right",
+            "ratio": 0.5,
             "action": "new",
             "params": {"url": "https://example.com/docs"},
         },
@@ -479,41 +499,41 @@ def test_list_and_views_read_the_inventory_document(
     )
 
 
-_TREE_LAYOUT = {
-    "active_panel": "g1",
-    "panels": [
-        {"address": "app:chat?instance=agent-1", "tab_id": "tab-1", "title": "Alice"},
+_DESKTOP_LAYOUT = {
+    "desktop_size": {"width": 1440, "height": 900},
+    "windows": [
+        {
+            "address": "app:chat?instance=agent-1",
+            "tab_id": "tab-1",
+            "title": "Alice",
+            "rect": {"x": 0, "y": 0, "width": 576, "height": 900},
+            "is_minimized": False,
+            "is_maximized": False,
+            "is_on_top": False,
+        },
         {
             "address": "app:terminal?instance=terminal-1",
             "tab_id": "tab-2",
             "title": "Terminal 1",
+            "rect": {"x": 0, "y": 0, "width": 500, "height": 400},
+            "is_minimized": True,
+            "is_maximized": False,
+            "is_on_top": False,
         },
-        {"address": "app:files", "tab_id": "tab-3", "title": "Files"},
+        {
+            "address": "app:files",
+            "tab_id": "tab-3",
+            "title": "Files",
+            "rect": {"x": 576, "y": 0, "width": 864, "height": 900},
+            "is_minimized": False,
+            "is_maximized": False,
+            "is_on_top": True,
+        },
     ],
-    "tree": {
-        "type": "branch",
-        "arrangement": "row",
-        "size_ratio": 1.0,
-        "children": [
-            {
-                "type": "leaf",
-                "size_ratio": 0.4,
-                "panels": [
-                    {"address": "app:chat?instance=agent-1", "active": True},
-                    {"address": "app:terminal?instance=terminal-1", "active": False},
-                ],
-            },
-            {
-                "type": "leaf",
-                "size_ratio": 0.6,
-                "panels": [{"address": "app:files", "active": True}],
-            },
-        ],
-    },
 }
 
 
-def test_inspect_renders_one_line_per_group(
+def test_inspect_renders_one_line_per_window(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(
@@ -521,41 +541,53 @@ def test_inspect_renders_one_line_per_group(
         "_post_layout",
         _make_fake_post(
             [],
-            (200, {"view_id": "everything", "client_id": "c1", "layout": _TREE_LAYOUT}),
+            (200, {"view_id": "everything", "client_id": "c1", "layout": _DESKTOP_LAYOUT}),
         ),
     )
     assert layout.main(["inspect"]) == 0
     captured = capsys.readouterr()
     assert "(view: everything, client: c1)" in captured.err
     assert captured.out == (
-        "active_panel: g1\n"
-        "row size=1.0\n"
-        "  [app:chat?instance=agent-1* app:terminal?instance=terminal-1] size=0.4\n"
-        "  [app:files*] size=0.6\n"
+        "desktop 1440x900\n"
+        '  app:chat?instance=agent-1  "Alice"  576x900 at (0,0)\n'
+        '  app:terminal?instance=terminal-1  "Terminal 1"  500x400 at (0,0)  (minimized)\n'
+        '  app:files  "Files"  864x900 at (576,0)  (on top)\n'
     )
 
 
-def test_where_shows_tab_mates_and_neighbors(
+def test_inspect_says_so_when_nothing_is_open(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setattr(
-        layout, "_post_layout", _make_fake_post([], (200, {"layout": _TREE_LAYOUT}))
+        layout,
+        "_post_layout",
+        _make_fake_post([], (200, {"layout": {"desktop_size": None, "windows": []}})),
+    )
+    assert layout.main(["inspect"]) == 0
+    assert capsys.readouterr().out == "(nothing open)\n"
+
+
+def test_where_shows_a_window_and_what_lies_around_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        layout, "_post_layout", _make_fake_post([], (200, {"layout": _DESKTOP_LAYOUT}))
     )
     assert layout.main(["where", "app:chat?instance=agent-1", "--json"]) == 0
     view = json.loads(capsys.readouterr().out)
     assert view["title"] == "Alice"
-    assert view["group"]["tabs"] == [
-        "app:chat?instance=agent-1*",
-        "app:terminal?instance=terminal-1",
-    ]
+    assert view["rect"] == {"x": 0, "y": 0, "width": 576, "height": 900}
+    assert view["state"] == []
+    # What is beside it is decided by where the windows are; a window that has been put away
+    # is nowhere on screen, so it is beside nothing.
     assert view["neighbors"] == {
         "left": [],
-        "right": ["app:files*"],
+        "right": ["app:files"],
         "above": [],
         "below": [],
     }
     assert layout.main(["where", "app:browser?instance=x"]) == layout.EXIT_ERROR
-    assert "not currently open" in capsys.readouterr().err
+    assert "has no window on this desktop" in capsys.readouterr().err
 
 
 # ---------- exit codes ----------

@@ -32,6 +32,8 @@ Parsed by the `app_manifest` library (section 14) with pydantic, `extra = "forbi
 | `icon` | string | unless `internal` | | Path relative to the manifest, `.svg`, validated by `forward_port.py`'s `validate_icon` at registration. |
 | `instances` | bool | no | `false` | `true` exposes the instances API. |
 | `instances_url` | string | no | the app URL | `http://127.0.0.1:<port>` or `http://localhost:<port>`; where the shell reaches the instances API. Only allowed with `instances = true`. |
+| `instance_search` | bool | no | `false` | `true` serves `GET /_instances/search` (section 4.4), which the desktop's search asks for what is *inside* an instance. Only allowed with `instances = true`. |
+| `browses_instances` | bool | no | `false` | `true` says the app lists its own instances inside its own window, so the desktop leaves them to it: the dock carries one tile per WINDOW open on the app rather than one per instance it is running (section 6). Only allowed with `instances = true`. |
 | `critical` | bool | no | `false` | No Stop verb; snapshot-and-rollback target in the apply. |
 | `priority` | string | no | `"user"` | A key of `SERVICE_BANDS` in `oom_priority.bands`, or `user`. |
 | `program` | string | no | `name` | The supervisord program that runs the app. |
@@ -50,13 +52,13 @@ A single-instance app (`instances = false`) has exactly one synthesized action, 
 
 Built-in manifests:
 
-| App | `instances` | `instances_url` | `critical` | `priority` | `default_shortcut` | `actions` |
-|---|---|---|---|---|---|---|
-| `system_interface` | false | | true | `system_interface` | none | none; also `internal = true` |
-| `chat` | true | app URL | true | `chat` | `{action = "new", mode = "new"}` | `new` ("New Chat", params `account_id` optional: a signed-in account to launch on; absent, the most recently used one, or a chat that waits for one when nothing is signed in; `message` optional: the first message the chat sends once it runs, kept by a waiting chat for its launch), `subagent` ("Open subagent", params `parent` and `session` required, `description` optional: the subagent's title) |
-| `terminal` | true | `http://127.0.0.1:7682` | true | `terminal` | `{action = "new", mode = "focus"}` | `new` ("New Terminal", params `workdir` optional) |
-| `files` | true | `http://127.0.0.1:8301` | false | `files` | `{action = "new", mode = "focus"}` | `new` ("New File Viewer", params `path` optional) |
-| `browser` | true | app URL | false | `browser` | `{action = "new", mode = "focus"}` | `new` ("New Browser", params `url` optional) |
+| App | `instances` | `instances_url` | `instance_search` | `browses_instances` | `critical` | `priority` | `default_shortcut` | `actions` |
+|---|---|---|---|---|---|---|---|---|
+| `system_interface` | false | | false | false | true | `system_interface` | none | none; also `internal = true` |
+| `chat` | true | app URL | true | true | true | `chat` | `{action = "new", mode = "new"}` | `new` ("New Chat", params `account_id` optional: a signed-in account to launch on; absent, the most recently used one, or a chat that waits for one when nothing is signed in; `message` optional: the first message the chat sends once it runs, kept by a waiting chat for its launch), `subagent` ("Open subagent", params `parent` and `session` required, `description` optional: the subagent's title) |
+| `terminal` | true | `http://127.0.0.1:7682` | false | false | true | `terminal` | `{action = "new", mode = "focus"}` | `new` ("New Terminal", params `workdir` optional) |
+| `files` | true | `http://127.0.0.1:8301` | false | false | false | `files` | `{action = "new", mode = "focus"}` | `new` ("New File Viewer", params `path` optional) |
+| `browser` | true | app URL | false | false | false | `browser` | `{action = "new", mode = "focus"}` | `new` ("New Browser", params `url` optional) |
 
 Every built-in except the shell points `icon` at an `icon.svg` beside its manifest; the shell is `internal` and has none.
 
@@ -73,6 +75,8 @@ Each `[[apps]]` row:
 | `display_name` | manifest | Absent on manifest-less rows; the shell then uses `name`. |
 | `instances` | manifest | Absent reads as `false`. |
 | `instances_url` | manifest | Absent reads as `url`. |
+| `instance_search` | manifest | Absent reads as `false`. |
+| `browses_instances` | manifest | Absent reads as `false`. |
 | `critical` | manifest | Absent reads as `false`. |
 | `priority` | manifest | Absent reads as `user`. |
 | `default_shortcut` | manifest | Inline table `{action, mode}`. |
@@ -144,6 +148,24 @@ Every mutating route, `DELETE` of an unknown key included, nudges the shell; the
 | browser | browser name | `/?session=<key>` | `Browser <N>` for `browser-<N>`, any other name verbatim | `working` while an agent holds control, else `idle` (a browser still launching included); `error` for a crashed browser; `stopped` while the user has it stopped. Every route but create and rename is `503` until the daemon's init gate opens (while it restores the saved browsers): list, delete, location, stop, and start (rename is `400`, gate or no gate); a create during restore queues behind the relaunches and the shell's next fetch picks the browser up | `explicit` | false | `POST /browsers`; `params.url` (optional, an absolute `http(s)` URL) is the first page the new browser opens on, so `layout.py open <url>` is one create rather than a create and a location the launching browser would refuse | `DELETE /browsers/<key>`; `503` before the init gate opens | navigates the live browser's active tab to the absolute URL in `path` (a rooted path is `400` for this app) and checkpoints its fleet manifest; `409` while an agent holds the browser or while it is launching, stopped, or crashed; `503` before the init gate opens | true for every browser; stop ends its Chromium after refreshing its tab list and keeps the browser, its profile, and its tabs (`409` while it is still launching); start relaunches it on those tabs from the same profile (`409` when the fleet is full); both `503` before the init gate opens; a stopped browser does not count toward the fleet cap, is restored as stopped after a daemon restart, and refuses the fleet CLI's verbs with status `stopped` |
 | chat | chat id (the id of the chat's first agent), or `<chat-id>.<agent-id>.<session-id>` for a subagent view of one of the chat's agents; one key per chat, listed from its active agent, and never an archived member of a chat (the chat record names it) | `/<key>` | the chat's display name; `Subagent: <description>` for a subagent (the session id when the create gave no description); the minted display name for a provisional instance (`New chat` when there is none yet) | a dead lifecycle (stopped or done; unknown is not evidence of death and counts as alive) `stopped`; else pending permission `attention`; else thinking or tool-running `working`; else `idle`; a provisional chat by its phase: `attention` while it waits for an account, `working` while its create runs, `error` when the create failed; subagent `idle` | `explicit` for agents, `referenced` for provisional and subagent instances | true for agents, false otherwise | `new` mints the chat id and a provisional record: with `account_id`, or with any signed-in account (the most recently used), the create starts at once; with nothing signed in the chat waits for an account and its page shows the provider chooser, whose sign-in launches it under the same id (`POST /api/chats/create` with `chat_id`); a failed create keeps the record in the `failed` phase with the reason, and the page can try again on the same account; `subagent` requires `parent` (a listed chat) and `session`, takes an optional `description`, keys the view on the chat's active agent, and returns an existing record when one exists | `mngr destroy --force` naming every agent of the chat, archived members included, then the chat's record; drops the record for a subagent; drops a provisional chat that is waiting for an account or failed, and is a no-op for a create in flight | `400` | true for an agent, false for a provisional or subagent instance; stop is `mngr stop` (the chat's transcript and name stay, and the record answers `stopped` at once), start is the in-process ensure-started path a send takes to revive a stopped agent; stop, start, and rename answer `409` while the chat is moving to another agent (its status is then `working`, or `error` when the new agent could not be started) |
 
+### 4.4 Searching inside instances (optional)
+
+An app that declares `instance_search = true` serves one more route on its instances API:
+
+| Route | Request | Response | Errors |
+|---|---|---|---|
+| `GET /_instances/search?q=<text>&limit=<count>` | | `200 {"matches": [{"key", "snippet"}, ...]}` | `400` a blank or over-long query, or a limit that is not a whole number at least 1; `400` from an app that does not search; `503` initialising |
+
+`q` is trimmed and at most 256 characters; `limit` defaults to 10 and is held to 50.
+`snippet` is the matching line, whitespace-collapsed, at most 240 characters -- what the result row shows under the title.
+It is **prose the user could have read**, never a record the app keeps about it: no serialized structure, no ids, no timestamps, no paths.
+Matches come back best first, and the app decides what "inside" means for it -- with that same rule on what may match at all, because a result row the user does not recognise is worse than no row.
+The route is a read: it never nudges the shell.
+
+The shell matches every instance's **title** itself, out of the lists it already holds, and asks only the apps that declare the capability for the rest (section 6, `GET /api/search`).
+That split is what lets the desktop search a conversation's contents while the shell still names no app: the chat app declares the capability and searches its own transcripts; nothing in the shell knows what a transcript is.
+
+
 ## 5. Shell routes apps and scripts call
 
 All routes below are on the shell (`MINDS_WORKSPACE_SERVER_URL`, default `http://127.0.0.1:8000`).
@@ -194,15 +216,62 @@ Projects and views:
 | `POST /api/projects/<id>/tabs/remove` | `{"address"}` | `200 project` |
 | `POST /api/projects/<id>/shortcuts` | `{"app", "action", "mode"}` | `200 project`; replaces the entry for `(app, action)` |
 | `POST /api/projects/<id>/shortcuts/remove` | `{"app", "action"}` | `200 project` |
-| `GET /api/layouts/<view_id>?client=<client_id>&device=<device_kind>` | | `200 layout` (the client's own, else the seed for its device kind, else `{"dockview": null}`); `device` names the seed for a client the shell has no record of yet |
+| `GET /api/layouts/<view_id>?client=<client_id>&device=<device_kind>` | | `200 layout` (the client's own, else the seed for its device kind, else `{"desktop": null}`); `device` names the seed for a client the shell has no record of yet |
 | `POST /api/layouts/<view_id>` | `layout` plus `client_id`, `save_id`, `base_updated_at` | `200 {"updated_at"}`, the stamp written (the window's next `base_updated_at`), `null` when the body equalled the stored arrangement and nothing was written or broadcast; `409 {"detail"}` when the stored layout's `updated_at` is newer than `base_updated_at` (the window refetches and applies the stored one) |
 | `GET /api/clients` | | `{"clients": [client, ...]}`; a window reads its own record here on boot to learn its active view |
 | `GET /api/inventory` | | the inventory document (section 9) |
+| `GET /api/search?q=<text>` | | `200 {"results": [{"app", "app_display_name", "icon", "label", "key", "url", "title", "status", "matched_on", "snippet"}, ...]}`: everything the user has started that matches, running or stopped. Titles the shell matches itself over every listed instance of every non-internal app; `matched_on` is then `title` and `snippet` is empty. For `content` the shell asks, in parallel, every running app whose registry row carries `instance_search` (section 4.4) and resolves each match back to the instance the app lists, dropping one it does not; an app that fails, refuses or answers unreadably contributes nothing and the rest of the answer stands. Title matches come first (most recently active first), then the content matches in registry order; a blank query is `200` with no results, never an error. At most 8 matches per app and 40 results in all |
 | `GET /api/templates-catalog` | | the New Tab page's template catalog: `200 {"catalog": {"generated_at", "templates": [template with "thumbnail_url" resolved to an absolute URL, ...], "shelves": [{"key", "title", "slugs"}]}, "is_stale": bool}` (`is_stale` when the shell is answering its last good copy because the fetch failed); `200 {"catalog": null, "is_stale": false}` when no catalog URL is configured; `503 {"detail"}` when nothing could be loaded. The document, its URL, and its cache are described in `catalog/README.md` and `docs/system/blueprint/new-tab-page/plan-new-tab-page.md` |
 
 `project` is `{"id", "name", "color", "glyph", "tabs": [address], "shortcuts": [{"app", "action", "mode"}]}`.
-`layout` is `{"dockview": <dockview JSON>, "device_kind", "updated_at"}`.
-What each panel shows lives only in the `params` dockview keeps on the panel, at `dockview.panels.<panel_id>.params`: `{"kind": "instance", "address", "tabId", "lastFocusedMs"}` for a tab showing an instance, `{"kind": "launcher"}` for a New Tab page. `tabId` is the page's id (`tab-<16 hex>`), minted by the panel that first opened the page and shared by every panel showing it; for that first panel it equals the panel id. `lastFocusedMs` is epoch milliseconds the panel was last the active one, 0 for never. There is no second copy of a panel's identity beside the document, so nothing can fall out of step with it; a file or a save body from before this rule, which carried a `tabs` block, is folded into the panels' params on read.
+`layout` is `{"desktop": <desktop document>, "device_kind", "updated_at"}`; `desktop` is `null` for a view the client has never arranged.
+
+The **desktop document** is what one client's desktop holds for one view:
+
+```json
+{
+  "version": 1,
+  "windows": [
+    {
+      "tab_id": "tab-0f1e2d3c4b5a6978",
+      "address": "app:chat?instance=agent-1",
+      "rect": {"x": 120, "y": 72, "width": 900, "height": 620},
+      "is_minimized": false,
+      "is_maximized": false,
+      "restore_rect": null,
+      "last_focused_ms": 1758155400000,
+      "last_known_title": "make ipad ui"
+    }
+  ],
+  "icons": {"cell_by_entry": {"make-something": {"column": 9, "row": 5}}},
+  "dock": {"is_hiding": false},
+  "desktop_size": {"width": 1440, "height": 900}
+}
+```
+
+- `windows` **is** the stacking order: the last is topmost. One window per instance and one per page: an instance has one live page, so a document naming the same address (or the same `tab_id`) twice is read as one window, the first.
+- `tab_id` is the page's id (`tab-<16 hex>`), minted when the page was first opened and carried in its url, exactly as before; it is what a tab rebind (section 8) and the app contract (section 10) name.
+- `rect` is in CSS pixels from the desktop area's top left. A window is never narrower than 340 or shorter than 200, since one too small to grab could not be opened again.
+- `is_minimized` is the window put away with its page still loaded -- the same state, to the user, as an instance that has never had a window: running, with nothing showing it.
+- `is_maximized` fills the desktop and requires `restore_rect`, which is where the window goes back to.
+- `last_focused_ms` is epoch milliseconds the window was last raised, 0 for never.
+- `last_known_title` is what the window was called the last time its instance was listed, written on every save and `null` only for a window that has never been saved with one. It is a memory, never authoritative: the live title wins whenever the instance is listed. It exists because a window outlives its instance (see below), and a restored window whose instance is gone has nothing else to be called -- and an address is developer text the user must never be shown.
+- `icons.cell_by_entry` is the grid cell the user dropped each desktop icon in, as a `column` and a `row` counted from the desktop area's top left, keyed by the entry's name (an app's registry name, or `make-something` for the shell's own entry). The whole desktop is a grid, so an icon can be put anywhere on it, but it lands squarely in a cell and two never share one. An entry with no cell flows along the top row in the default order, so an app built later appears at the end of the row. A cell off the edge of a narrower desktop is DRAWN at the nearest free one that is on it, without the saved cell being touched, so the arrangement comes back whole when the desktop is wide again. A cell saved for an entry that no longer exists is ignored. A desktop written before the cells carries either a flat index per entry or a pixel `position_by_entry`, and both are read as the cell they land in; the next save writes cells.
+- `dock.is_hiding` is whether the dock slides away until it is hovered.
+- `desktop_size` is the desktop area the geometry was laid out against, written by the browser on every save. The shell's own ops place windows against it (a tiling split halves it); a document that has never been saved by a browser carries `null` and the shell uses a nominal 1200x800. A desktop restored onto a smaller screen has its windows drawn back within reach and never resized, so the arrangement survives moving between screens.
+
+**Restoring a desktop is a read.** Fitting an arrangement to the screen it is being looked at on -- windows drawn back within reach, icons drawn at the nearest cell that exists -- changes what is drawn and never what is stored, and a client that loads a desktop and is left alone writes nothing at all. The reason is that the restore is the only lossy step: a client that saved what it had reconstructed would turn any inaccuracy in it, or any narrower screen, into permanent loss of the arrangement -- not at once, but the next time anything at all was saved.
+- The Make something window shows no instance and is the desktop's own, so it is not saved; it is one click to open again.
+
+**A window whose instance no app lists** is kept rather than dropped, because the app may list it again and the window reconnects when it does (the rule of section 4, applied to windows). Until then:
+
+- it is called `last_known_title`, else its app's `display_name`, else `Untitled` -- never its address;
+- it is drawn as the empty frame it is: dimmed chip and title, and a message in place of its page saying what happened and that closing the window clears it;
+- it has **no dock tile**, since the dock is only what is RUNNING and nothing is. A window on screen with nothing in the dock is the deliberate consequence;
+- minimized as well as unavailable, it shows nothing anywhere -- out of sight, with nothing running to put in the dock -- and becomes reachable again the moment its app lists the instance;
+- its **close button clears the window away**. Close means stop, there is nothing left to stop, and what remains of the verb is the only way the user can be rid of a stale window. It is still not a delete: there is nothing left to delete.
+
+A layout file (or a save body) from before the desktop -- one carrying a dockview grid, with or without the `tabs` block that preceded its panel params -- is read as the desktop that grid becomes: every docked tab is one cascaded window under the title that tab carried (its `customTitle`, else its `title`, so a migrated window whose instance has since gone still knows what it was called), ordered so the tab that was looked at most recently comes back on top, and a New Tab launcher panel is dropped (the desktop, its `+` menu and its Make something window are what replaced that page). The grid itself is not kept, so the next save writes the file in the new shape.
 `client` is `{"id", "device_kind", "active_view", "last_seen", "is_connected"}`; `is_connected` says whether any window of the client holds the WebSocket right now.
 `base_updated_at` is the `updated_at` of the layout the window last fetched or last saved successfully, `null` for a view it has only ever seen empty.
 
@@ -213,7 +282,7 @@ Everything (`view_id = everything`) accepts layout reads and writes and rejects 
 All under `data/.state/system_interface/`, written atomically (temp file plus rename) under one process-wide lock.
 
 - `projects.json`: `{"version": 1, "projects": [project, ...]}` in creation order.
-- `layouts/<view_id>/<client_id>.json`: a `layout` (section 6).
+- `layouts/<view_id>/<client_id>.json`: a `layout` (section 6), whose `desktop` is the client's windows, icon arrangement and dock setting for that view.
 - `layouts/<view_id>/seed.<device_kind>.json`: a `layout`; rewritten on every save a browser of that device kind makes.
   The shell's own writes (an agent op, a tab rebind, a deleted address) never copy a client's layout over a seed: a delete or a rebind edits the seed files directly, and an agent op edits only the target client's file.
   An op on a view the client has no file for first materializes the client's copy from the seed of its device kind.
@@ -244,13 +313,13 @@ Outbound (shell to browser):
 | `tab_rebound` | `{"client_id", "view_id", "tab_id", "address"}` | after `POST /api/tabs/<tab_id>/instance`; the owning client re-addresses that tab, adds the address to the view's tab set through the projects route, and saves |
 | `layout_op` | `{"op", "args", "requester", "target_client_id"}` | only the four transient verbs of section 12 (`maximize`, `restore`, `refresh`, `reload_system_interface`); `requester` is the address of the instance that posted the op (its own chat), `""` when unknown, and is what `self` resolves to; `target_client_id` names the client whose windows apply it, `null` for the two machine-wide forms |
 
-`app` is `{"name", "display_name", "icon", "label", "url", "internal", "program", "critical", "instances_url", "has_instances", "actions": [{"id", "label", "params": [name, ...]}], "default_shortcut", "launcher_rank", "is_running", "is_listed", "instances": [record, ...]}`.
+`app` is `{"name", "display_name", "icon", "label", "url", "internal", "program", "critical", "instances_url", "has_instances", "browses_instances", "actions": [{"id", "label", "params": [name, ...]}], "default_shortcut", "launcher_rank", "is_running", "is_listed", "instances": [record, ...]}`.
 `is_listed` is false until the app's instances API has answered a list once (a single-instance app's synthesized record counts): a client shows a tab as unavailable only when its address is missing from a list that has arrived, never from the empty seed, and treats nothing as missing before its first non-empty `apps_updated`.
 A single-instance app carries one synthesized record: key `""`, url `/`, title `display_name`, status `idle` while running and `stopped` otherwise, lifetime `explicit`, renameable `false`, stoppable `false` (the app-level Stop and Start are its verbs).
 
 The shell's socket carries nothing about chats.
 The chat pages read `/api/ws` on the chat's origin, which sends `chats_updated` (one `ChatSnapshot` per chat, its agent-level facts under `active_agent`), `provisional_chat_created` (a provisional chat's whole record, sent again when its phase changes) and `provisional_chat_completed` (`{"chat_id", "success", "error"}`; `success` false with a reason is a failed create, false with `null` a chat discarded before it launched).
-The arrangement ops `open`, `focus`, `split`, `close`, and `move` never travel on the socket: the shell applies them to the layout file and the file's `layout_updated` is what the windows see.
+The arrangement ops `open`, `focus`, `split`, `close`, and `move` never travel on the socket: the shell applies them to the client's desktop document and the file's `layout_updated` is what the windows see.
 
 ## 9. The inventory document
 
@@ -285,6 +354,7 @@ Unknown types are ignored; shipped types never change meaning.
 | app to shell | `shell:focused` | `{}` |
 | app to shell | `shell:location` | `{"path"}`; the shell resolves the frame to its tab, remembers the path as that tab's last reported path, and relays it to the owning app's location route |
 | app to shell | `shell:open` | `{"address"}`; the address must name the posting frame's app; the shell docks the instance beside the posting tab, or focuses the tab already showing it in this client, and titles the tab from the inventory |
+| app to shell | `shell:title` | `{"key", "title"}`; the name an instance of the posting frame's app is about to have (a rename the app has accepted but not finished); the shell titles that instance's windows with it at once, until the inventory reports the instance with that title (or a minute passes, or the app posts the old name back after a refusal) |
 
 The shell clears the tab's last reported path when it points the frame at a url itself; a page's own navigation, and the report it posts while loading (before the frame's `load` event), leave it standing.
 The shell reloads a docked tab's frame when the instance's listed `url` differs from the tab's last reported path (with `{tab}` substituted), which is what makes an agent's `replace-url` land and a page's own reports inert.
@@ -307,10 +377,17 @@ The client's layout file is the truth of the arrangement, so the shell applies e
 
 - **The target client.** Every op that reads or changes one client's arrangement resolves to exactly one client: `--client <id>`, else the client that most recently messaged the requester's instance (the client-activity log), else the one connected client. When none of those settles it, the op fails with `412` and a detail that lists the connected clients and their views and asks for `--client`; the shell never guesses across clients and never applies an op to every client. A `--client` with no record is `404`. `context`, `views`, `list`, and the relay verbs `rename`, `delete`, `stop`, `start`, and `replace-url` reach the whole machine and take no `--client`; `refresh <app>` and the interface reload are machine-wide too.
 - **The target view.** `--view <name>` (a project's name or id, or Everything; `--layout` is an alias) names the view whose arrangement the op edits; without it the op edits the client's active view. A `--view` that differs from the client's active view also switches the client to it (the record is written and `active_view_changed` is broadcast), so the user sees what the agent arranged.
-- **Document ops.** `open`, `focus`, `split`, `close`, and `move` are applied by the shell to the client's layout of the view: the file is read (materialized from the seed of the client's device kind when the client has none), edited by the pure editor (`shell/dockview_document.py`), written, and `layout_updated` is broadcast; a project view files an opened address into its tab set and a close runs the referenced-instance cleanup, exactly as a browser's save does. Placement follows the document's tree, never the screen: the anchor is the requester's own chat panel when the document holds it, else the document's active group, else its first group; a direction finds the nearest enclosing branch of the matching orientation and the sibling on that side, and tabs into that group unless `--new-group`; a split takes `--ratio` of the anchor group's own extent. A launcher (New Tab) panel is an ordinary tab and an op docks beside it, with one exception, which is per pane: a launcher alone in the group an op fills stands for that pane, and is dropped as the op's panel takes its place. A group showing nothing, or one launcher, is a pane to fill rather than split beside, so a direction naming it fills it and a `--new-group` for it is spent on it; a group holding several launchers is holding tabs the user asked for and is split beside like any other.
+- **Document ops.** `open`, `focus`, `split`, `close`, and `move` are applied by the shell to the client's desktop for the view: the file is read (materialized from the seed of the client's device kind when the client has none), edited by the pure editor (`shell/desktop_document.py`), written, and `layout_updated` is broadcast; a project view files an opened address into its tab set, exactly as a browser's save does. What each means on a desktop:
+    - `open` puts a new window on top, **tiled beside the requester's own window**: an app an agent opens for the user lands next to the chat that opened it, both readable at once, rather than covering the conversation that asked for it. It takes the same anchor a bare `split` would (`relative_to`, defaulting to `self`) and the same default direction (the new window on the right), so `--relative-to` / `--direction` / `--ratio` steer it too. The tiling is a preference, not a precondition: with no requester, or a requester with no window on this desktop, the window is cascaded at the default size as before -- an open always opens, and never fails for want of an anchor (that is `split`'s contract, not this one). An instance that already has a window is raised instead, since an instance has one page and therefore one window.
+    - `focus` raises a window to the top of the stack and brings it back out of the dock if it was put away.
+    - `close` **puts the window away** -- the desktop's minimize: it goes out of sight, its page stays loaded, and what it shows keeps running and stays in the dock, dimmed. `stop` is the verb for ending what a window shows, and the window's own close button is the gesture for it. This is what `close` has always meant for an agent (it "changes no tab set and stops nothing"); the desktop only gives the state a name.
+    - `split` **tiles**: the anchor is resized to one half of the desktop and the new window fills the other, so both can be seen at once. `--direction` picks the side the new window takes and `--ratio` how much of the desktop it gets (half by default). `--direction within` has no side to take, so it opens the new window over the anchor's own rect, on top of it.
+    - `move` snaps an already-open window to the named side of its anchor, with the same tiling arithmetic, **without reloading it**: the window's page is untouched, which is what makes `move` safe to use on a chat or a terminal. `within` gives the moved window the anchor's exact rect and puts it directly above the anchor in the stack -- these two occupy one slot, and this one is on top. A moved window comes out of the dock and out of maximized.
+    - `--new-group` is accepted and ignored: a desktop has no tab groups.
+    - A split's anchor is settled before anything else, so an op that names an anchor it does not have is refused as that rather than as the instance it was about to open, and a create that would have followed never runs.
 - **Creates.** `open <address> [--action <id>] [--param name=value]...` (and `split` of the same forms): `app:<name>` of an app with instances runs the create through the shell's relay inside the op, `--action` or the app's `default_shortcut.action` or its first declared action with every `--param`, then docks the record it made; the app's refusal (a `400`, `409`, or `503`) is the op's error, verbatim. `app:<name>?instance=<key>` docks a listed instance (`404` when nothing lists it). A bare `https://` or `http://` URL means `open app:browser --action new --param url=<url>`. A bare word that is an app name means `app:<word>`. An `open` of an address the document already shows focuses it. An op names the address it made in its answer, which `open` prints to stdout.
 - **Transient verbs.** `maximize`, `restore`, `refresh`, and `reload_system_interface` change what is on screen without changing the saved document, so they alone travel as a `layout_op` message (section 8) to the resolved client's windows; `refresh app:<name>` and the interface reload go to every window.
-- **Answers.** A document op answers `{"ok", "view_id", "client_id", "layout", "created_address"?}` with `layout` in the shape `inspect` prints, so the script prints its diff from the answer and exits; nothing polls.
+- **Answers.** A document op answers `{"ok", "view_id", "client_id", "layout", "created_address"?}` with `layout` in the shape `inspect` prints: `{"desktop_size", "windows": [{"address", "tab_id", "title", "rect", "is_minimized", "is_maximized", "is_on_top"}, ...]}`, bottom of the stack first. The script prints its diff from the answer and exits; nothing polls.
 - `rename <address> <title>`, `delete <address>`, `stop <address>`, and `start <address>` call the shell's relay routes; `replace-url <address> <path-or-url>` calls the relay's location route.
 - `list` reads `GET /api/inventory` and prints, per app: `name`, `display_name`, `is_running`, `actions`, and `instances` with `key`, `address`, `title`, `status`, `docked_in` (client ids; `--view` narrows it to clients whose active view is that view). `views` reads the same document and prints every view with `tabs` (addresses) and `clients` (ids with device kind); `context` prints every client with `active_view`, `device_kind`, `is_connected`, and recent activity. `shortcuts` for Everything derives the fixed rail from the inventory's apps.
 - Exit codes are `0`, `1`, `3`.

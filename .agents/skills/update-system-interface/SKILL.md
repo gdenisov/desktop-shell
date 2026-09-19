@@ -1,6 +1,6 @@
 ---
 name: update-system-interface
-description: Canonical flow for changing the system interface (the web workspace UI at system/apps/system_interface) -- its frontend (the dockview shell, the sidebar, the New Tab launcher) or backend (Flask server, the inventory over the app registry, layout ops) -- and the shared frontend library at system/libs/workspace_ui. Use whenever the user wants to edit, fix, restyle, or add to the workspace UI / dockview.
+description: Canonical flow for changing the system interface (the web workspace UI at system/apps/system_interface) -- its frontend (the desktop shell: icons, windows and the dock) or backend (Flask server, the inventory over the app registry, layout ops) -- and the shared frontend library at system/libs/workspace_ui. Use whenever the user wants to edit, fix, restyle, or add to the workspace UI / the desktop.
 metadata:
   author: imbue
 ---
@@ -8,7 +8,7 @@ metadata:
 # Updating the system interface
 
 `system/apps/system_interface` is the live web UI the user is looking at right now
-(the dockview shell, the sidebar, the New Tab launcher). A broken build here is
+(the desktop shell: its icons, its windows and its dock). A broken build here is
 served straight to the user, so you never edit the served copy directly: you
 make every change in an **isolated worktree clone**, verify it builds and passes
 there, and only merge it back into the served tree once it's known-good. This
@@ -181,8 +181,11 @@ agent, not the motivating conversation -- so the real case isn't on screen by
 default. If a real conversation motivated the change:
 
 - Open the **motivating** conversation in the preview's inner app with Playwright
-  (`--no-sandbox`): use the tab bar's add-tab (`+`) dropdown and pick the real
-  agent (its `.dockview-add-tab-dropdown-item`), or otherwise navigate to it.
+  (`--no-sandbox`): a running chat has a tile in the dock
+  (`#dock .dock-item[data-address="app:chat?instance=<agent-id>"]`), and clicking
+  it opens a window on that conversation; a chat that is stopped is found by
+  opening the `+` (`#dock-new`), typing its name into the field that opens
+  (`#dock-search-field`) and clicking its result row.
 - Look at it and **confirm the change actually fixed the real case**, comparing
   it against what looked wrong in the original complaint. A worker reporting
   `done` with passing tests is not proof the real case is fixed -- you have the
@@ -190,8 +193,8 @@ default. If a real conversation motivated the change:
   it still looks wrong, the fix missed the real DOM: re-brief the worker rather
   than merging.
 - Tell the user how to see the real case themselves (the preview opens on the
-  worker's empty agent; they switch via the `+` dropdown to the motivating
-  agent).
+  worker's empty agent; they click the motivating conversation's tile in the
+  dock, or search for it from the `+` menu).
 
 Then confirm with the user: a binary keep/discard *and*
 room for free-form notes (what looks off, what they'd change). Wait for their
@@ -333,14 +336,20 @@ python3 .agents/skills/update-system-interface/scripts/reveal_system_interface.p
 that failed partway.
 
 `unpreview` only handles the *service* side; it does **not** touch the workspace
-layout. The `si-preview` tab you opened earlier with `layout.py open` is a
-separate concern (a layout panel, not a service), so you must close it yourself
--- otherwise the user is left with a stale tab pointing at a now-deregistered
-service:
+layout. The `si-preview` window you opened earlier with `layout.py open` is a
+separate concern (a window on the user's desktop, not a service), so you must
+put it away yourself -- otherwise the user is left looking at a window pointing
+at a now-deregistered service:
 
 ```bash
 python3 system/scripts/layout.py close si-preview
 ```
+
+On a desktop `close` means minimize, so this takes the window out of sight
+rather than off the arrangement. That is enough here: `unpreview` has
+deregistered the app, so the window has no dock tile to come back from and
+nothing on screen refers to it. Do the `close` **before** the `unpreview` when
+you can, so the window is already away while the app still exists.
 
 Do this on every one of those exits, not only the successful one. Once the
 preview is down and its tab is closed, destroy the worker (this flow does not

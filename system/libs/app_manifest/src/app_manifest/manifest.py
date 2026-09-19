@@ -103,6 +103,14 @@ class AppManifest(FrozenModel):
     icon: IconPath | None = Field(default=None, description="The icon file, relative to the manifest; required unless internal")
     instances: bool = Field(default=False, description="Whether the app serves the instances API")
     instances_url: InstancesUrl | None = Field(default=None, description="Where the instances API is served when not at the app URL")
+    instance_search: bool = Field(
+        default=False,
+        description="Whether the app searches inside its own instances, serving GET /_instances/search",
+    )
+    browses_instances: bool = Field(
+        default=False,
+        description="Whether the app presents its own list of its instances inside its window, so the workspace need not list them one by one",
+    )
     critical: bool = Field(default=False, description="No Stop verb; snapshot-and-rollback target in the update apply")
     priority: PriorityName = Field(default=DEFAULT_PRIORITY, description="The memory-shedding band name")
     program: ProgramName = Field(description="The supervisord program that runs the app (defaults to the name)")
@@ -139,6 +147,10 @@ class AppManifest(FrozenModel):
             raise InvalidManifestValueError("icon is required unless internal = true")
         if self.instances_url is not None and not self.instances:
             raise InvalidManifestValueError("instances_url is only allowed with instances = true")
+        if self.instance_search and not self.instances:
+            raise InvalidManifestValueError("instance_search is only allowed with instances = true")
+        if self.browses_instances and not self.instances:
+            raise InvalidManifestValueError("browses_instances is only allowed with instances = true")
         if self.actions and not self.instances:
             raise InvalidManifestValueError("actions are only allowed with instances = true")
         if self.handles:

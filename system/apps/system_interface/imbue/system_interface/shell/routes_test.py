@@ -12,7 +12,6 @@ from flask.testing import FlaskClient
 
 from imbue.system_interface.app_context import state_of
 from imbue.system_interface.shell.data_types import ClientStateReport
-from imbue.system_interface.shell.data_types import instance_panel_params_json
 from imbue.system_interface.shell.inventory import HttpInstanceFetcher
 from imbue.system_interface.shell.liveness import probe_all_app_liveness
 from imbue.system_interface.shell.primitives import Address
@@ -25,7 +24,8 @@ from imbue.system_interface.shell.state import ShellState
 from imbue.system_interface.shell.testing import FakeInstanceFetcher
 from imbue.system_interface.shell.testing import TEST_NOW
 from imbue.system_interface.shell.testing import TEST_TERMINAL_URL
-from imbue.system_interface.shell.testing import addresses_by_panel_id
+from imbue.system_interface.shell.testing import addresses_of_layout
+from imbue.system_interface.shell.testing import desktop_showing
 from imbue.system_interface.shell.testing import build_inventory
 from imbue.system_interface.shell.testing import drain_messages
 from imbue.system_interface.shell.testing import instance_record
@@ -75,8 +75,14 @@ def _record_client(app: Flask, client_id: str, view_id: str) -> None:
     )
 
 
-def _panel_addresses(layout: dict[str, Any]) -> list[str]:
-    return [panel["address"] for panel in layout["panels"]]
+def _window_addresses(layout: dict[str, Any]) -> list[str]:
+    """The addresses an op's answer reports, bottom of the stack first."""
+    return [window["address"] for window in layout["windows"]]
+
+
+def _saved_desktop(*addresses: Address) -> dict[str, Any]:
+    """A desktop as a window posts it: one plain window per address, in stacking order."""
+    return desktop_showing(*addresses).model_dump(mode="json")
 
 
 # ---------- section 5 ----------
@@ -109,8 +115,8 @@ def test_a_tab_report_rebinds_the_tab_everywhere_and_files_it_in_the_project(
     assert response.status_code == 204
     alpha = shell.layouts.read_layout("alpha", "c1", DeviceKind.DESKTOP)
     everything = shell.layouts.read_layout("everything", "c2", DeviceKind.DESKTOP)
-    assert list(addresses_by_panel_id(alpha.dockview).values()) == [_TERMINAL_2]
-    assert list(addresses_by_panel_id(everything.dockview).values()) == [_TERMINAL_2]
+    assert addresses_of_layout(alpha) == [_TERMINAL_2]
+    assert addresses_of_layout(everything) == [_TERMINAL_2]
     assert shell.projects.get_project("alpha").tabs == (_TERMINAL_2,)
     messages = drain_messages(client_queue)
     rebound = [message for message in messages if message["type"] == "tab_rebound"]
@@ -119,7 +125,11 @@ def test_a_tab_report_rebinds_the_tab_everywhere_and_files_it_in_the_project(
         ("c2", "everything"),
     }
     assert rebound[0]["address"] == str(_TERMINAL_2) and rebound[0]["tab_id"] == "tab-0000000000000000"
-    assert [message["type"] for message in messages][-1] == "apps_updated"
+    # The refetched list lands BEFORE the rebind: a window pointed at an instance it has not heard
+    # of yet would drop its page and reload it when the list arrived (a chat created and shown in
+    # the same window did exactly that).
+    types = [message["type"] for message in messages]
+    assert types.index("apps_updated") < types.index("tab_rebound")
     assert shell.inventory.find_instance(_TERMINAL_2) is not None
 
 
@@ -264,7 +274,7 @@ def test_a_relayed_delete_drops_the_instance_from_every_tab_set_and_layout(
 
     assert shell.projects.get_project("alpha").tabs == (stub_2,)
     remaining = shell.layouts.read_layout("alpha", "c1", DeviceKind.DESKTOP)
-    assert addresses_by_panel_id(remaining.dockview) == {"p1": stub_2}
+    assert addresses_of_layout(remaining) == [stub_2]
     types = [message["type"] for message in drain_messages(client_queue)]
     assert "projects_updated" in types and "layout_updated" in types
 
@@ -450,7 +460,7 @@ def test_layouts_are_read_per_client_with_the_seed_as_fallback(client: FlaskClie
     assert client.get("/api/layouts/everything?client=c1&device=tablet").status_code == 400
     empty = client.get("/api/layouts/everything?client=c1&device=mobile").get_json()
     assert empty == {
-        "dockview": None,
+        "desktop": None,
         "device_kind": "mobile",
         "updated_at": None,
     }
@@ -460,7 +470,7 @@ def test_layouts_are_read_per_client_with_the_seed_as_fallback(client: FlaskClie
         "client_id": "c1",
         "save_id": "save-0000000000000001",
         "device_kind": "desktop",
-        "dockview": {"panels": {"p0": {"params": instance_panel_params_json(_TERMINAL_1, _TAB, 5)}}},
+        "desktop": _saved_desktop(_TERMINAL_1),
     }
     saved = client.post("/api/layouts/everything", json=body)
     assert saved.status_code == 200 and saved.get_json()["updated_at"] is not None
@@ -469,11 +479,11 @@ def test_layouts_are_read_per_client_with_the_seed_as_fallback(client: FlaskClie
     assert client.post("/api/layouts/everything", json={**body, "save_id": "nope"}).status_code == 400
 
     own = client.get("/api/layouts/everything?client=c1").get_json()
-    assert list(addresses_by_panel_id(own["dockview"]).values()) == [_TERMINAL_1]
-    assert "tabs" not in own and own["updated_at"] == saved.get_json()["updated_at"]
+    assert [window["address"] for window in own["desktop"]["windows"]] == [str(_TERMINAL_1)]
+    assert own["updated_at"] == saved.get_json()["updated_at"]
     seeded = client.get("/api/layouts/everything?client=c2&device=desktop").get_json()
-    assert seeded["dockview"] == own["dockview"]
-    assert client.get("/api/layouts/everything?client=c2&device=mobile").get_json()["dockview"] is None
+    assert seeded["desktop"] == own["desktop"]
+    assert client.get("/api/layouts/everything?client=c2&device=mobile").get_json()["desktop"] is None
     # The write was announced with the window's own save id; a save that changes nothing is not.
     updates = [message for message in drain_messages(client_queue) if message["type"] == "layout_updated"]
     assert updates == [
@@ -493,15 +503,56 @@ def test_layouts_are_read_per_client_with_the_seed_as_fallback(client: FlaskClie
     assert unchanged.status_code == 200 and unchanged.get_json() == {"updated_at": None}
     assert drain_messages(client_queue) == []
     # A save based on an older arrangement than the stored one is refused, and one based on the stored one lands.
-    stale = {**again, "base_updated_at": None, "dockview": None}
+    stale = {**again, "base_updated_at": None, "desktop": None}
     assert client.post("/api/layouts/everything", json=stale).status_code == 409
-    fresh = {**again, "dockview": None}
+    fresh = {**again, "desktop": None}
     assert client.post("/api/layouts/everything", json=fresh).status_code == 200
-    assert client.get("/api/layouts/everything?client=c1").get_json()["dockview"] is None
+    assert client.get("/api/layouts/everything?client=c1").get_json()["desktop"] is None
 
 
-def test_a_save_in_the_older_shape_is_folded_into_the_panels_params(client: FlaskClient, app: Flask) -> None:
-    """A window still running the bundle from before params-only layouts posts a ``tabs`` block; the shell keeps its meaning."""
+def test_a_window_saves_what_it_keeps_about_the_desktop_itself(client: FlaskClient, app: Flask) -> None:
+    """The geometry, the stacking order, the icon arrangement and the dock's own setting all survive a save."""
+    body = {
+        "client_id": "c1",
+        "save_id": "save-0000000000000001",
+        "device_kind": "desktop",
+        "desktop": {
+            "windows": [
+                {
+                    "tab_id": str(_TAB),
+                    "address": str(_TERMINAL_1),
+                    "rect": {"x": 40, "y": 50, "width": 800, "height": 600},
+                    "is_minimized": True,
+                    "last_focused_ms": 12,
+                },
+                {
+                    "tab_id": "tab-00000000000000bb",
+                    "address": str(_FILES),
+                    "rect": {"x": 0, "y": 0, "width": 1440, "height": 900},
+                    "is_maximized": True,
+                    "restore_rect": {"x": 10, "y": 20, "width": 700, "height": 500},
+                },
+            ],
+            "icons": {"cell_by_entry": {"files": {"column": 3, "row": 1}}},
+            "dock": {"is_hiding": True},
+            "desktop_size": {"width": 1440, "height": 900},
+        },
+    }
+    assert client.post("/api/layouts/everything", json=body).status_code == 200
+    stored = client.get("/api/layouts/everything?client=c1").get_json()["desktop"]
+    minimized, maximized = stored["windows"]
+    assert minimized["rect"] == {"x": 40, "y": 50, "width": 800, "height": 600}
+    assert minimized["is_minimized"] is True and minimized["last_focused_ms"] == 12
+    assert maximized["is_maximized"] is True and maximized["restore_rect"]["width"] == 700
+    assert stored["icons"] == {"cell_by_entry": {"files": {"column": 3, "row": 1}}}
+    assert stored["dock"] == {"is_hiding": True}
+    assert stored["desktop_size"] == {"width": 1440, "height": 900}
+
+
+def test_a_save_from_a_window_that_still_holds_a_dockview_arrangement_is_read_as_a_desktop(
+    client: FlaskClient, app: Flask
+) -> None:
+    """A window running the bundle from before the desktop shell posts a grid; its tabs become windows."""
     body = {
         "client_id": "c1",
         "save_id": "save-0000000000000001",
@@ -513,13 +564,9 @@ def test_a_save_in_the_older_shape_is_folded_into_the_panels_params(client: Flas
     }
     assert client.post("/api/layouts/everything", json=body).status_code == 200
     own = client.get("/api/layouts/everything?client=c1").get_json()
-    assert "tabs" not in own
-    assert own["dockview"]["panels"]["p0"]["params"] == {
-        "kind": "instance",
-        "address": str(_TERMINAL_1),
-        "tabId": str(_TAB),
-        "lastFocusedMs": 5,
-    }
+    assert "dockview" not in own and "tabs" not in own
+    window = own["desktop"]["windows"][0]
+    assert (window["address"], window["tab_id"]) == (str(_TERMINAL_1), str(_TAB))
 
 
 def test_clients_and_the_inventory_document_are_served(client: FlaskClient, app: Flask) -> None:
@@ -555,7 +602,7 @@ def test_a_recorded_client_reads_the_seed_of_its_own_device_kind(client: FlaskCl
         "client_id": "m1",
         "save_id": "save-0000000000000001",
         "device_kind": "mobile",
-        "dockview": {"panels": {"p0": {"params": instance_panel_params_json(_FILES, _TAB, 0)}}},
+        "desktop": _saved_desktop(_FILES),
     }
     assert client.post("/api/layouts/everything", json=mobile_body).status_code == 200
     _shell(app).clients.record_report(
@@ -568,7 +615,8 @@ def test_a_recorded_client_reads_the_seed_of_its_own_device_kind(client: FlaskCl
     )
 
     seeded = client.get("/api/layouts/everything?client=c2&device=desktop").get_json()
-    assert seeded["device_kind"] == "mobile" and list(addresses_by_panel_id(seeded["dockview"]).values()) == [_FILES]
+    assert seeded["device_kind"] == "mobile"
+    assert [window["address"] for window in seeded["desktop"]["windows"]] == [str(_FILES)]
 
 
 # ---------- the broadcast endpoint ----------
@@ -630,13 +678,13 @@ def test_the_read_ops_answer_from_the_state_files_and_the_activity_log(client: F
 
     inspected = _broadcast(client, "inspect", {"view": "Alpha"}).get_json()
     assert inspected["client_id"] == "c1"
-    assert inspected["layout"]["panels"] == [
-        {
-            "address": str(_TERMINAL_1),
-            "tab_id": "tab-0000000000000000",
-            "title": "Terminal 1",
-        }
-    ]
+    window = inspected["layout"]["windows"][0]
+    assert (window["address"], window["tab_id"], window["title"]) == (
+        str(_TERMINAL_1),
+        "tab-0000000000000000",
+        "Terminal 1",
+    )
+    assert window["is_on_top"] is True and window["rect"]["width"] > 0
 
     context = _broadcast(client, "context").get_json()["clients"]
     assert [entry["client_id"] for entry in context] == ["c1", "c9"]
@@ -668,7 +716,7 @@ def test_an_op_is_attributed_to_the_client_that_last_messaged_the_requesting_age
     shell.activity.append_message("c7", "desktop", "alpha", "chat", "agent-1", "hello")
     attributed = _broadcast(client, "inspect", {"view": "alpha"}).get_json()
     assert attributed["client_id"] == "c7"
-    assert [panel["address"] for panel in attributed["layout"]["panels"]] == [str(_TERMINAL_1)]
+    assert _window_addresses(attributed["layout"]) == [str(_TERMINAL_1)]
     assert _broadcast(client, "inspect", {"view": "alpha"}, agent_id="agent-2").get_json()["client_id"] is None
     assert _broadcast(client, "inspect", {"view": "alpha", "client": "c1"}).get_json()["client_id"] == "c1"
     # A client id names a layout file, so one outside the id's alphabet is refused before any read.
@@ -730,25 +778,26 @@ def test_document_ops_edit_the_target_clients_file_and_announce_the_write(client
         "c1",
         None,
     )
-    assert _panel_addresses(answer["layout"]) == [str(_TERMINAL_1)]
+    assert _window_addresses(answer["layout"]) == [str(_TERMINAL_1)]
     # The file is the truth: written for this client, filed into the project, and announced with a shell-minted id.
     stored = shell.layouts.read_client_layout("alpha", "c1")
-    assert stored is not None and list(addresses_by_panel_id(stored.dockview).values()) == [_TERMINAL_1]
-    assert stored.dockview is not None and stored.dockview["grid"]["root"]["type"] == "branch"
+    assert stored is not None and addresses_of_layout(stored) == [_TERMINAL_1]
+    assert stored.desktop is not None and stored.desktop.windows[0].rect.width > 0
     assert shell.projects.get_project("alpha").tabs == (_TERMINAL_1,)
     messages = drain_messages(client_queue)
     updates = [message for message in messages if message["type"] == "layout_updated"]
     assert len(updates) == 1 and updates[0]["client_id"] == "c1" and updates[0]["view_id"] == "alpha"
     assert updates[0]["save_id"].startswith("save-")
     assert "projects_updated" in [message["type"] for message in messages]
-    # Opening an address the arrangement already shows focuses it rather than docking it twice; since that panel
-    # is the active one already, nothing is written or announced.
-    assert _panel_addresses(_broadcast(client, "open", {"address": str(_TERMINAL_1)}).get_json()["layout"]) == [
+    # Opening an instance that already has a window raises it rather than opening a second one; since that
+    # window is already on top, nothing is written or announced.
+    assert _window_addresses(_broadcast(client, "open", {"address": str(_TERMINAL_1)}).get_json()["layout"]) == [
         str(_TERMINAL_1)
     ]
     assert shell.layouts.read_client_layout("alpha", "c1") == stored
     assert [message["type"] for message in drain_messages(client_queue) if message["type"] == "layout_updated"] == []
 
+    # A split tiles the two windows over the desktop: the anchor moves aside for what lands beside it.
     split = _broadcast(
         client,
         "split",
@@ -760,128 +809,141 @@ def test_document_ops_edit_the_target_clients_file_and_announce_the_write(client
         },
     )
     assert split.status_code == 200
-    tree = split.get_json()["layout"]["tree"]
-    assert tree["type"] == "branch" and tree["children"][0]["type"] == "branch"
-    assert [leaf["panels"][0]["address"] for leaf in tree["children"][0]["children"]] == [
-        str(_TERMINAL_1),
-        str(_FILES),
-    ]
+    anchor, placed = split.get_json()["layout"]["windows"]
+    assert (anchor["address"], placed["address"]) == (str(_TERMINAL_1), str(_FILES))
+    assert anchor["rect"]["y"] == 0 and placed["rect"]["y"] == anchor["rect"]["height"]
+    assert placed["is_on_top"] is True
     bad_anchor = _broadcast(client, "split", {"address": str(_TERMINAL_2), "relative_to": "app:nope"})
     assert bad_anchor.status_code == 404 and "app:nope" in bad_anchor.get_json()["detail"]
     assert _broadcast(client, "split", {"address": str(_FILES), "direction": "sideways"}).status_code == 400
 
     focused = _broadcast(client, "focus", {"address": str(_TERMINAL_1)})
     assert focused.status_code == 200
-    focused_leaf = focused.get_json()["layout"]["tree"]["children"][0]["children"][0]
-    assert focused_leaf["panels"][0]["active"] is True
+    assert _window_addresses(focused.get_json()["layout"]) == [str(_FILES), str(_TERMINAL_1)]
     assert _broadcast(client, "focus", {"address": "app:browser?instance=x"}).status_code == 404
 
+    # A move snaps an open window beside its anchor without reopening it: same page, new geometry.
     moved = _broadcast(
         client,
         "move",
         {
             "address": str(_FILES),
             "relative_to": str(_TERMINAL_1),
-            "direction": "within",
+            "direction": "right",
         },
     )
     assert moved.status_code == 200
-    assert [panel["address"] for panel in moved.get_json()["layout"]["tree"]["children"][0]["panels"]] == [
-        str(_TERMINAL_1),
-        str(_FILES),
-    ]
+    moved_windows = {window["address"]: window for window in moved.get_json()["layout"]["windows"]}
+    assert moved_windows[str(_TERMINAL_1)]["rect"]["x"] == 0
+    assert moved_windows[str(_FILES)]["rect"]["x"] == moved_windows[str(_TERMINAL_1)]["rect"]["width"]
+    assert moved_windows[str(_FILES)]["is_on_top"] is True
+    after_move = shell.layouts.read_client_layout("alpha", "c1")
+    assert after_move is not None and after_move.desktop is not None
+    moved_pages = {window.address: window.tab_id for window in after_move.desktop.windows}
+    assert set(moved_pages) == {_TERMINAL_1, _FILES}
 
+    # Closing puts a window away and leaves everything else alone: the instance keeps running, and the
+    # window is still there to come back to.
     closed = _broadcast(client, "close", {"address": str(_FILES)})
-    assert closed.status_code == 200 and _panel_addresses(closed.get_json()["layout"]) == [str(_TERMINAL_1)]
-    assert _broadcast(client, "close", {"address": str(_FILES)}).status_code == 404
-    emptied = _broadcast(client, "close", {"address": str(_TERMINAL_1)})
-    assert emptied.status_code == 200 and emptied.get_json()["layout"] == {
-        "active_panel": None,
-        "panels": [],
-        "tree": None,
-    }
-    # Closing changes no tab set.
+    assert closed.status_code == 200
+    put_away = {window["address"]: window for window in closed.get_json()["layout"]["windows"]}
+    assert put_away[str(_FILES)]["is_minimized"] is True
+    assert put_away[str(_TERMINAL_1)]["is_minimized"] is False
+    assert put_away[str(_FILES)]["tab_id"] == moved_pages[_FILES]
+    assert _broadcast(client, "close", {"address": "app:browser?instance=x"}).status_code == 404
+    # Closing changes no tab set, and stops nothing.
     assert shell.projects.get_project("alpha").tabs == (_TERMINAL_1, _FILES)
 
 
-def test_self_names_the_requesters_own_docked_instance(client: FlaskClient, app: Flask) -> None:
-    """``self`` is the requester's own instance, read from the op's ``requester``: where ``open`` lands, the target of
-    any addressed op, and the anchor a split or a move defaults to. An op that carried no requester cannot mean it."""
-    client.post("/api/projects", json={"name": "Alpha", "color": "#111111", "glyph": 1})
-    _register_client(app, "c1", "alpha")
-
-    def as_terminal_1(op: str, args: dict[str, Any]) -> Any:
-        return client.post("/api/layout/broadcast", json={"op": op, "args": args, "requester": str(_TERMINAL_1)})
-
-    def leaf_addresses(layout: dict[str, Any]) -> list[list[str]]:
-        tree = layout["tree"]
-        leaves = tree["children"] if tree["type"] == "branch" else [tree]
-        return [[panel["address"] for panel in leaf["panels"]] for leaf in leaves]
-
-    assert as_terminal_1("open", {"address": str(_TERMINAL_1)}).status_code == 200
-    # An open lands beside the requester's own docked instance.
-    opened = as_terminal_1("open", {"address": str(_FILES)})
-    assert opened.status_code == 200
-    assert leaf_addresses(opened.get_json()["layout"]) == [[str(_TERMINAL_1)], [str(_FILES)]]
-
-    unattributed = client.post("/api/layout/broadcast", json={"op": "focus", "args": {"address": "self"}})
-    assert unattributed.status_code == 400 and "requester" in unattributed.get_json()["detail"]
-
-    focused = as_terminal_1("focus", {"address": "self"})
-    assert focused.status_code == 200
-    assert focused.get_json()["layout"]["active_panel"] != opened.get_json()["layout"]["active_panel"]
-
-    # A move with no anchor is relative to self: within its group tabs beside it.
-    moved = as_terminal_1("move", {"address": str(_FILES), "direction": "within"})
-    assert moved.status_code == 200
-    assert leaf_addresses(moved.get_json()["layout"]) == [[str(_TERMINAL_1), str(_FILES)]]
-
-
-def test_an_open_with_no_docked_anchor_tabs_into_the_active_group(
-    client: FlaskClient, app: Flask, fetcher: FakeInstanceFetcher
-) -> None:
-    """An ``open`` with nothing to be beside -- the auto-open reactor, or any agent surfacing its own
-    chat, which is never docked yet -- lands where the user is looking. Docking it *beside* the active
-    group instead split a fresh column open every time that group was the rightmost, which it usually
-    is, and each such open left its own group active for the next one to split beside."""
-    client.post("/api/projects", json={"name": "Alpha", "color": "#111111", "glyph": 1})
-    fetcher.list(TEST_TERMINAL_URL, instance_record("terminal-1"), instance_record("terminal-2"))
-    _shell(app).inventory.refetch_now("terminal")
-    _register_client(app, "c1", "alpha")
-
-    def leaf_addresses(layout: dict[str, Any]) -> list[list[str]]:
-        tree = layout["tree"]
-        leaves = tree["children"] if tree["type"] == "branch" else [tree]
-        return [[panel["address"] for panel in leaf["panels"]] for leaf in leaves]
-
-    def as_terminal_1(op: str, args: dict[str, Any]) -> Any:
-        return client.post("/api/layout/broadcast", json={"op": op, "args": args, "requester": str(_TERMINAL_1)})
-
-    # Two groups, the right-hand one active: an anchored open still splits beside its docked requester.
-    assert as_terminal_1("open", {"address": str(_TERMINAL_1)}).status_code == 200
-    anchored = as_terminal_1("open", {"address": str(_FILES)})
-    assert leaf_addresses(anchored.get_json()["layout"]) == [[str(_TERMINAL_1)], [str(_FILES)]]
-
-    # The reactor's own op: no requester at all, so no anchor to be beside.
-    unanchored = client.post(
-        "/api/layout/broadcast", json={"op": "open", "args": {"address": str(_TERMINAL_2)}, "requester": ""}
-    )
-    assert unanchored.status_code == 200
-    assert leaf_addresses(unanchored.get_json()["layout"]) == [[str(_TERMINAL_1)], [str(_FILES), str(_TERMINAL_2)]]
-
-
-def test_an_unanchored_open_still_splits_when_it_asks_for_a_new_group(client: FlaskClient, app: Flask) -> None:
-    """``new_group`` is the caller saying it wants a column of its own, and ``_dock`` reads a ``within``
-    direction ahead of that flag -- so the unanchored default must not swallow the flag."""
+def test_new_group_is_accepted_and_ignored(client: FlaskClient, app: Flask) -> None:
+    """A desktop has no tab groups, so the flag every existing caller may still pass means nothing here."""
     client.post("/api/projects", json={"name": "Alpha", "color": "#111111", "glyph": 1})
     _register_client(app, "c1", "alpha")
 
     assert _broadcast(client, "open", {"address": str(_TERMINAL_1)}).status_code == 200
-    split = _broadcast(client, "open", {"address": str(_FILES), "new_group": True})
+    opened = _broadcast(client, "open", {"address": str(_FILES), "new_group": True})
+    assert opened.status_code == 200
+    assert _window_addresses(opened.get_json()["layout"]) == [str(_TERMINAL_1), str(_FILES)]
 
-    assert split.status_code == 200
-    tree = split.get_json()["layout"]["tree"]
-    assert tree["type"] == "branch" and len(tree["children"]) == 2
+
+def test_self_names_the_requesters_own_open_window(client: FlaskClient, app: Flask) -> None:
+    """``self`` is the requester's own instance, read from the op's ``requester``: the target of any addressed
+    op, and the anchor a split or a move defaults to. An op that carried no requester cannot mean it."""
+    client.post("/api/projects", json={"name": "Alpha", "color": "#111111", "glyph": 1})
+    _register_client(app, "c1", "alpha")
+
+    def as_terminal_1(op: str, args: dict[str, Any]) -> Any:
+        return client.post("/api/layout/broadcast", json={"op": op, "args": args, "requester": str(_TERMINAL_1)})
+
+    assert as_terminal_1("open", {"address": str(_TERMINAL_1)}).status_code == 200
+    assert as_terminal_1("open", {"address": str(_FILES)}).status_code == 200
+
+    unattributed = client.post("/api/layout/broadcast", json={"op": "focus", "args": {"address": "self"}})
+    assert unattributed.status_code == 400 and "requester" in unattributed.get_json()["detail"]
+
+    # ``self`` resolves to the requester's own window, which focusing raises to the top.
+    focused = as_terminal_1("focus", {"address": "self"})
+    assert focused.status_code == 200 and _window_addresses(focused.get_json()["layout"])[-1] == str(_TERMINAL_1)
+
+    # A move with no anchor is relative to self: within puts the moved window in the requester's own place.
+    moved = as_terminal_1("move", {"address": str(_FILES), "direction": "within"})
+    assert moved.status_code == 200
+    windows = {window["address"]: window for window in moved.get_json()["layout"]["windows"]}
+    assert windows[str(_FILES)]["rect"] == windows[str(_TERMINAL_1)]["rect"]
+    assert windows[str(_FILES)]["is_on_top"] is True
+
+
+def test_an_open_tiles_beside_the_requesters_own_window(client: FlaskClient, app: Flask) -> None:
+    """An app an agent opens lands beside the chat that opened it, not cascaded on top of it.
+
+    The user asked for this: an app opened for them should be readable next to the conversation
+    that asked for it. ``open`` takes the same anchor a bare ``split`` would -- the requester's
+    own window -- and the same default direction, so the new window takes the right half and the
+    requester is resized into the left.
+    """
+    client.post("/api/projects", json={"name": "Alpha", "color": "#111111", "glyph": 1})
+    _register_client(app, "c1", "alpha")
+
+    def as_terminal_1(op: str, args: dict[str, Any]) -> Any:
+        return client.post("/api/layout/broadcast", json={"op": op, "args": args, "requester": str(_TERMINAL_1)})
+
+    # The requester's own window first: nothing to sit beside yet, so it opens on its own.
+    assert as_terminal_1("open", {"address": str(_TERMINAL_1)}).status_code == 200
+    opened = as_terminal_1("open", {"address": str(_FILES)})
+    assert opened.status_code == 200
+
+    windows = {window["address"]: window for window in opened.get_json()["layout"]["windows"]}
+    anchor, placed = windows[str(_TERMINAL_1)]["rect"], windows[str(_FILES)]["rect"]
+    # Side by side over the whole desktop, on one row, the new window on the right and in front.
+    assert anchor["x"] == 0
+    assert placed["x"] == anchor["width"]
+    assert abs(anchor["width"] - placed["width"]) <= 1
+    assert anchor["y"] == placed["y"] == 0
+    assert anchor["height"] == placed["height"]
+    assert windows[str(_FILES)]["is_on_top"] is True
+
+
+def test_an_open_with_nothing_to_sit_beside_still_opens(client: FlaskClient, app: Flask) -> None:
+    """The tiling is a preference, never a precondition: an open must always open.
+
+    A ``split`` names its anchor and fails without it. An ``open`` has only the requester to go
+    on, so a requester with no window on this desktop -- or no requester at all, as a loopback
+    caller posts -- cascades the window as it always did rather than refusing.
+    """
+    client.post("/api/projects", json={"name": "Alpha", "color": "#111111", "glyph": 1})
+    _register_client(app, "c1", "alpha")
+
+    # The requesting chat has no window here, so there is nothing to tile against.
+    opened = _broadcast(client, "open", {"address": str(_TERMINAL_1)})
+    assert opened.status_code == 200
+    only = opened.get_json()["layout"]["windows"][0]
+    assert only["address"] == str(_TERMINAL_1)
+    # Cascaded, not tiled: it is inset from the desktop's corner rather than pinned to it.
+    assert only["rect"]["x"] > 0 and only["rect"]["y"] > 0
+
+    # A split in the same position is the error case, which is the difference being asserted.
+    refused = _broadcast(client, "split", {"address": str(_FILES)})
+    assert refused.status_code == 404
 
 
 def test_an_op_lands_with_no_browser_connected_and_never_on_a_guessed_client(client: FlaskClient, app: Flask) -> None:
@@ -892,7 +954,7 @@ def test_an_op_lands_with_no_browser_connected_and_never_on_a_guessed_client(cli
     # A recorded client with no window open is a fine target when named.
     _record_client(app, "c1", "alpha")
     landed = _broadcast(client, "open", {"address": str(_TERMINAL_1), "client": "c1"})
-    assert landed.status_code == 200 and _panel_addresses(landed.get_json()["layout"]) == [str(_TERMINAL_1)]
+    assert landed.status_code == 200 and _window_addresses(landed.get_json()["layout"]) == [str(_TERMINAL_1)]
     assert shell.layouts.read_client_layout("alpha", "c1") is not None
     assert _broadcast(client, "open", {"address": str(_TERMINAL_1), "client": "nobody"}).status_code == 404
     # Two clients connected and no attribution: refused with the clients listed, never applied to both.
@@ -930,7 +992,7 @@ def test_view_edits_that_views_file_and_switches_the_client_to_it(client: FlaskC
     shell.layouts.save_browser_layout("alpha", "seed-maker", layout_showing(_FILES), None, TEST_NOW)
     _record_client(app, "c2", "everything")
     inherited = _broadcast(client, "open", {"address": str(_TERMINAL_1), "view": "alpha", "client": "c2"})
-    assert _panel_addresses(inherited.get_json()["layout"]) == [
+    assert _window_addresses(inherited.get_json()["layout"]) == [
         str(_FILES),
         str(_TERMINAL_1),
     ]
@@ -962,7 +1024,7 @@ def test_open_of_a_bare_app_creates_through_the_relay_inside_the_op(
     )
     assert created.status_code == 200
     assert created.get_json()["created_address"] == "app:stub?instance=stub-1"
-    assert _panel_addresses(created.get_json()["layout"]) == ["app:stub?instance=stub-1"]
+    assert _window_addresses(created.get_json()["layout"]) == ["app:stub?instance=stub-1"]
     assert [(str(record.key), record.title, str(record.url)) for record in stub_source.records] == [
         ("stub-1", "Stub 1", "/x")
     ]
@@ -981,7 +1043,7 @@ def test_open_of_a_bare_app_creates_through_the_relay_inside_the_op(
     stub_source.is_ready = False
     assert _broadcast(client, "open", {"address": "app:stub"}).status_code == 503
     stored = _shell(app).layouts.read_client_layout("everything", "c1")
-    assert stored is not None and len(addresses_by_panel_id(stored.dockview)) == 2
+    assert stored is not None and len(addresses_of_layout(stored)) == 2
 
 
 def test_transient_ops_reach_the_target_clients_windows(client: FlaskClient, app: Flask) -> None:

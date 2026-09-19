@@ -56,6 +56,12 @@ class RegistryRow(FrozenModel):
     display_name: DisplayName | None = Field(default=None, description="What users see; absent on manifest-less rows")
     instances: bool = Field(default=False, description="Whether the app serves the instances API")
     instances_url: InstancesUrl | None = Field(default=None, description="Where the instances API is served; absent reads as url")
+    instance_search: bool = Field(
+        default=False, description="Whether the app searches inside its own instances for the shell"
+    )
+    browses_instances: bool = Field(
+        default=False, description="Whether the app lists its own instances inside its window"
+    )
     critical: bool = Field(default=False, description="No Stop verb; snapshot-and-rollback target in the update apply")
     priority: PriorityName = Field(default=DEFAULT_PRIORITY, description="The memory-shedding band name")
     default_shortcut: DefaultShortcut | None = Field(default=None, description="The rail row a new project is seeded with")

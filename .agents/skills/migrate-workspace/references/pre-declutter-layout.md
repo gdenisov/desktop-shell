@@ -208,8 +208,8 @@ built.
   another mind can be created from it or adopt it. See `publish-template`,
   `use-template`, `update-installed-template`.
 - **Layout operations.** `system/scripts/layout.py` inspects and rearranges the
-  dockview tabs -- open, split, move, focus, rename, close, maximize, swap a URL.
-  See `manage-layout`.
+  desktop's windows -- open, split, move, focus, rename, close, maximize, swap a
+  URL. See `manage-layout`.
 - **`data/.apps/` and `data/.skills/`.** Per-creation data has a declared home
   instead of sharing one `runtime/` directory, and the visible/hidden split under
   `data/` tells the user which folders are theirs to organize.

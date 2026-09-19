@@ -141,6 +141,22 @@ def test_list_maps_every_non_primary_agent(agent_manager: AgentManager) -> None:
     assert record.last_active is None
 
 
+def test_a_chat_that_was_messaged_says_when_it_was_last_active(agent_manager: AgentManager) -> None:
+    """The desktop's menu leads with what was used most recently, which for a chat is its last message."""
+    chat_id = _agent_id()
+    _seed_agent(agent_manager, chat_id, "Chat-1")
+    source = _source(agent_manager)
+    assert source.list_instances()[0].last_active is None
+
+    agent_manager.record_message_sent(ChatId(chat_id))
+
+    last_active = source.list_instances()[0].last_active
+    assert last_active is not None and last_active.tzinfo is not None
+    snapshot = agent_manager.get_chat_snapshot(chat_id)
+    assert snapshot is not None and snapshot.last_messaged_at is not None
+    assert abs(last_active.timestamp() - snapshot.last_messaged_at) < 0.001
+
+
 def test_title_falls_back_to_the_true_name_without_a_display_label(agent_manager: AgentManager) -> None:
     chat_id = _agent_id()
     _seed_agent(agent_manager, chat_id, "Chat-1", labels={})

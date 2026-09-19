@@ -210,7 +210,8 @@ def test_inspect_and_context_round_trip_through_script_and_endpoint(
 
     inspect = _run_layout_script(["inspect", "--json"], layout_server, sandbox)
     assert inspect.returncode == 0, f"stderr={inspect.stderr!r}"
-    assert json.loads(inspect.stdout)["panels"] == []
+    # Nobody has arranged anything, so there is no desktop yet: no windows, and no size measured.
+    assert json.loads(inspect.stdout) == {"desktop_size": None, "windows": []}
 
     context = _run_layout_script(["context", "--json"], layout_server, sandbox)
     assert context.returncode == 0, f"stderr={context.stderr!r}"
@@ -251,10 +252,15 @@ def test_list_shows_every_app_with_the_seeded_instance(layout_server: PipelineHa
     assert listing[_STUB_APP_NAME]["is_running"] is True
 
 
-def _inspect_addresses(harness: PipelineHarness, cwd: Path, client_id: str) -> list[str]:
+def _inspect_windows(harness: PipelineHarness, cwd: Path, client_id: str) -> list[dict[str, Any]]:
+    """Every window on the client's desktop, bottom of the stack first, as ``inspect`` reports them."""
     inspected = _run_layout_script(["inspect", "--json", "--client", client_id], harness, cwd)
     assert inspected.returncode == 0, f"stderr={inspected.stderr!r}"
-    return [panel["address"] for panel in json.loads(inspected.stdout)["panels"]]
+    return list(json.loads(inspected.stdout)["windows"])
+
+
+def _inspect_addresses(harness: PipelineHarness, cwd: Path, client_id: str) -> list[str]:
+    return [window["address"] for window in _inspect_windows(harness, cwd, client_id)]
 
 
 def test_open_of_a_bare_app_creates_the_instance_and_docks_it_in_the_clients_file(
@@ -285,8 +291,9 @@ def test_open_of_a_bare_app_creates_the_instance_and_docks_it_in_the_clients_fil
 def test_open_and_close_of_an_instance_address_edit_the_clients_file(
     layout_server: PipelineHarness, tmp_path: Path
 ) -> None:
-    """``open`` docks a listed instance and ``close`` removes it, whether or not a window is open: the client only
-    has to be one the shell knows."""
+    """``open`` gives a listed instance a window and ``close`` puts that window away without ending it: on a desktop
+    closing a window IS minimizing it, so the window stays on the desktop under the same page id, dimmed in the dock.
+    The client only has to be one the shell knows."""
     sandbox = _sandbox(tmp_path)
     _wait_for_instance_listed(layout_server, sandbox, _SEEDED_APP_NAME, _SEEDED_ADDRESS)
     client_queue = layout_server.broadcaster.register()
@@ -295,14 +302,36 @@ def test_open_and_close_of_an_instance_address_edit_the_clients_file(
         open_result = _run_layout_script(["open", _SEEDED_ADDRESS, "--view", "Everything"], layout_server, sandbox)
         assert open_result.returncode == 0, f"stderr={open_result.stderr!r}"
         assert f"opened {_SEEDED_ADDRESS}" in open_result.stderr
-        assert _inspect_addresses(layout_server, sandbox, "client-1") == [_SEEDED_ADDRESS]
+        (opened,) = _inspect_windows(layout_server, sandbox, "client-1")
+        assert opened["address"] == _SEEDED_ADDRESS and opened["is_minimized"] is False
 
         close_result = _run_layout_script(["close", _SEEDED_ADDRESS, "--view", "Everything"], layout_server, sandbox)
         assert close_result.returncode == 0, f"stderr={close_result.stderr!r}"
-        assert _inspect_addresses(layout_server, sandbox, "client-1") == []
-        # Closing what is not open is a 404 with the address named.
-        missing = _run_layout_script(["close", _SEEDED_ADDRESS, "--view", "Everything"], layout_server, sandbox)
-        assert missing.returncode == 1 and _SEEDED_ADDRESS in missing.stderr
+        (minimized,) = _inspect_windows(layout_server, sandbox, "client-1")
+        assert minimized["address"] == _SEEDED_ADDRESS and minimized["is_minimized"] is True
+        # The page is the same one, kept loaded behind the dock rather than thrown away and rebuilt.
+        assert minimized["tab_id"] == opened["tab_id"]
+    finally:
+        layout_server.broadcaster.unregister(client_queue)
+
+
+def test_opening_a_closed_window_brings_the_same_page_back(layout_server: PipelineHarness, tmp_path: Path) -> None:
+    """``open`` of what a ``close`` put away raises that same window rather than making a second one, and closing
+    something that has no window at all is a 404 naming the address."""
+    sandbox = _sandbox(tmp_path)
+    _wait_for_instance_listed(layout_server, sandbox, _SEEDED_APP_NAME, _SEEDED_ADDRESS)
+    client_queue = layout_server.broadcaster.register()
+    layout_server.broadcaster.set_client_info(client_queue, "client-1", "everything", "desktop")
+    try:
+        for op in ("open", "close", "open"):
+            result = _run_layout_script([op, _SEEDED_ADDRESS, "--view", "Everything"], layout_server, sandbox)
+            assert result.returncode == 0, f"{op}: stderr={result.stderr!r}"
+        (restored,) = _inspect_windows(layout_server, sandbox, "client-1")
+        assert restored["address"] == _SEEDED_ADDRESS and restored["is_minimized"] is False
+
+        missing_address = f"app:{_STUB_APP_NAME}?instance=stub-404"
+        missing = _run_layout_script(["close", missing_address, "--view", "Everything"], layout_server, sandbox)
+        assert missing.returncode == 1 and missing_address in missing.stderr
     finally:
         layout_server.broadcaster.unregister(client_queue)
 

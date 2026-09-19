@@ -107,6 +107,9 @@ def test_preview_delegates_to_the_shared_script_with_si_specifics(
     assert _flag(argv, "--port-env") == reveal_mod.PREVIEW_PORT_ENV
     assert _flag(argv, "--host-env") == reveal_mod.PREVIEW_HOST_ENV
     assert _flag(argv, "--unset-env") == reveal_mod.ENV_MNGR_AGENT_ID
+    # The worker's app dir holds no registry, so the preview reads the served tree's: without
+    # this the preview lists no apps and the user previews an empty desktop.
+    assert _flag(argv, "--env") == f"{reveal_mod.ENV_APPS_FILE}={(tmp_path / reveal_mod.LIVE_APPS_FILE).resolve()}"
     assert _flag(argv, "--health-path") == reveal_mod.HEALTH_PATH
     assert _flag(argv, "--service-name") == reveal_mod.PREVIEW_INNER_SERVICE_NAME
     assert _flag(argv, "--preview-service-name") == reveal_mod.PREVIEW_SERVICE_NAME

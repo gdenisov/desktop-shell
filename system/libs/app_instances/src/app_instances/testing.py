@@ -28,13 +28,19 @@ from pydantic import Field, PrivateAttr
 from werkzeug.serving import make_server
 
 from app_instances.blueprint import build_instances_app
-from app_instances.data_types import InstanceLifetime, InstanceRecord, InstanceStatus
+from app_instances.data_types import (
+    InstanceLifetime,
+    InstanceMatch,
+    InstanceRecord,
+    InstanceStatus,
+)
 from app_instances.errors import (
     InstanceConflictError,
     LocationNotTrackedError,
     NotReadyError,
     NotRenameableError,
     NotStoppableError,
+    SearchNotSupportedError,
     UnknownActionError,
     UnknownInstanceError,
 )
@@ -53,6 +59,8 @@ from app_instances.primitives import (
     InstanceTitle,
     InstanceUrl,
     LocationTarget,
+    MatchSnippet,
+    SearchQuery,
     TitleTemplate,
 )
 from app_instances.sidecar import run_sidecar, serve_in_background
@@ -92,6 +100,12 @@ class StubInstanceSource(InstanceSourceInterface):
     create_refusal: str | None = Field(
         default=None,
         description="When set, create raises InstanceConflictError with this detail",
+    )
+    is_searchable: bool = Field(
+        default=False, description="Whether the stub searches inside its instances"
+    )
+    snippet_by_key: dict[str, str] = Field(
+        default_factory=dict, description="What each instance's content search answers with"
     )
     _lock: threading.Lock = PrivateAttr(default_factory=threading.Lock)
 
@@ -162,6 +176,21 @@ class StubInstanceSource(InstanceSourceInterface):
             )
             self._replace(relocated)
             return relocated
+
+    def search_instances(
+        self, query: SearchQuery, max_match_count: int
+    ) -> list[InstanceMatch]:
+        with self._lock:
+            self.calls.append(f"search:{query}:{max_match_count}")
+            self._require_ready()
+            if not self.is_searchable:
+                raise SearchNotSupportedError("the stub does not search inside its instances")
+            matches = [
+                InstanceMatch(key=InstanceKey(key), snippet=MatchSnippet(snippet))
+                for key, snippet in self.snippet_by_key.items()
+                if query.lower() in snippet.lower()
+            ]
+            return matches[:max_match_count]
 
     def stop_instance(self, key: InstanceKey) -> InstanceRecord:
         return self._set_status(key, "stop", "stopped", InstanceStatus.STOPPED)

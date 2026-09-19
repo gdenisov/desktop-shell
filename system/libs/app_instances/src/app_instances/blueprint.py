@@ -24,15 +24,24 @@ from app_instances.errors import (
     NotReadyError,
     NotRenameableError,
     NotStoppableError,
+    SearchNotSupportedError,
     UnknownActionError,
     UnknownInstanceError,
 )
 from app_instances.interfaces import InstanceNudgerInterface, InstanceSourceInterface
-from app_instances.primitives import InstanceKey
+from app_instances.primitives import InstanceKey, SearchQuery
 
 INSTANCES_PATH: Final[str] = "/_instances"
+# The optional search capability sits under the instances path rather than beside it, so an app
+# that mounts the blueprint under a prefix carries both together.
+SEARCH_PATH: Final[str] = f"{INSTANCES_PATH}/search"
 
 BLUEPRINT_NAME: Final[str] = "app_instances"
+
+# How many matches the shell is given when it asks for no particular number, and the ceiling on
+# what it may ask for: a result list is read at a glance, and a search runs on every keystroke.
+DEFAULT_MATCH_COUNT: Final[int] = 10
+MAX_MATCH_COUNT: Final[int] = 50
 
 HTTP_OK: Final[int] = 200
 HTTP_CREATED: Final[int] = 201
@@ -58,6 +67,7 @@ def status_code_for_error(error: AppInstancesError) -> int:
             | NotRenameableError()
             | NotStoppableError()
             | LocationNotTrackedError()
+            | SearchNotSupportedError()
         ):
             return HTTP_BAD_REQUEST
         case UnknownInstanceError():
@@ -78,6 +88,20 @@ def _record_json(record: InstanceRecord) -> dict[str, Any]:
 def _parse_key(raw_key: str) -> InstanceKey:
     """The key of a keyed route, checked against the key rule before any source is consulted."""
     return InstanceKey(raw_key)
+
+
+def _requested_match_count() -> int:
+    """How many matches the search asked for, held to the route's ceiling; a bad number is a 400."""
+    raw_limit = request.args.get("limit")
+    if raw_limit is None:
+        return DEFAULT_MATCH_COUNT
+    try:
+        requested = int(raw_limit)
+    except ValueError as e:
+        raise MalformedRequestError(f"invalid limit {raw_limit!r}: expected a whole number") from e
+    if requested < 1:
+        raise MalformedRequestError(f"invalid limit {requested}: expected at least 1")
+    return min(requested, MAX_MATCH_COUNT)
 
 
 def parse_request_body(model: type[_RequestModel]) -> _RequestModel:
@@ -122,6 +146,12 @@ def build_instances_blueprint(
     def list_instances() -> ResponseReturnValue:
         records = source.list_instances()
         return jsonify({"instances": [_record_json(record) for record in records]})
+
+    @blueprint.get(SEARCH_PATH)
+    def search_instances() -> ResponseReturnValue:
+        query = SearchQuery(request.args.get("q", ""))
+        matches = source.search_instances(query, _requested_match_count())
+        return jsonify({"matches": [match.model_dump(mode="json") for match in matches]})
 
     @blueprint.post(INSTANCES_PATH)
     def create_instance() -> ResponseReturnValue:

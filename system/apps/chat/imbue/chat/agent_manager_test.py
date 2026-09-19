@@ -29,6 +29,7 @@ from imbue.chat.accounts import read_index
 from imbue.chat.activity_state import ActivityState
 from imbue.chat.agent_discovery import AgentInfo
 from imbue.chat.agent_manager import AgentManager
+from imbue.chat.agent_manager import DESTROYED_TOMBSTONE_SECONDS
 from imbue.chat.agent_manager import FULL_SNAPSHOTS_BEFORE_A_CREATED_AGENT_IS_LET_GO
 from imbue.chat.agent_manager import HandoffCapabilities
 from imbue.chat.agent_manager import _SwitchTarget
@@ -244,6 +245,35 @@ def test_get_chat_snapshots(agent_manager: AgentManager) -> None:
     assert serialized[0]["handoff"] is None
     assert serialized[0]["active_agent"]["agent_id"] == "a1"
     assert serialized[0]["active_agent"]["activity_state"] is None
+
+
+def test_get_chat_snapshots_carries_each_chats_message_stamp(agent_manager: AgentManager) -> None:
+    """The list the pages sort by recency reads its stamps off the snapshots themselves."""
+    with agent_manager._lock:
+        agent_manager._agents["a1"] = AgentStateItem(
+            id="a1",
+            name="agent-one",
+            state="RUNNING",
+            labels={"user_created": "true"},
+            work_dir="/tmp/work",
+        )
+        agent_manager._agents["a2"] = AgentStateItem(
+            id="a2",
+            name="agent-two",
+            state="RUNNING",
+            labels={"user_created": "true"},
+            work_dir="/tmp/work",
+        )
+
+    agent_manager.record_message_sent(ChatId("a2"))
+
+    by_id = {snapshot.chat_id: snapshot for snapshot in agent_manager.get_chat_snapshots()}
+    assert by_id["a1"].last_messaged_at is None
+    assert by_id["a2"].last_messaged_at is not None
+    # And the single-chat read (the instances API's verbs) stamps the same way.
+    single = agent_manager.get_chat_snapshot("a2")
+    assert single is not None
+    assert single.last_messaged_at == by_id["a2"].last_messaged_at
 
 
 def test_resolve_agent_work_dir_from_own_env(agent_manager: AgentManager) -> None:
@@ -1065,6 +1095,42 @@ def test_remove_agent_drops_location(agent_manager: AgentManager) -> None:
 
     agent_manager.remove_agent(str(agent_id))
     assert agent_manager.get_agent_matches_by_id(str(agent_id)) == []
+
+
+def test_a_snapshot_taken_before_a_destroy_does_not_bring_the_agent_back(agent_manager: AgentManager) -> None:
+    """The observe stream lags a destroy by a few seconds: a snapshot from before it, delivered after,
+    listed the destroyed agent again, and the chat came back to every list until the next snapshot."""
+    agent_id, _host_id, agent = _full_snapshot_with_agent("doomed")
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
+    agent_manager.remove_agent(str(agent_id))
+    assert [item.id for item in agent_manager.get_agents()] == []
+
+    # The stale snapshot, and a stale per-agent update: neither revives it.
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
+    assert [item.id for item in agent_manager.get_agents()] == []
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
+    assert [item.id for item in agent_manager.get_agents()] == []
+
+    # The stream catches up: a full snapshot without it lets the tombstone go, so a later
+    # listing of that id is believed again.
+    agent_manager._handle_observe_event(make_full_agent_state_event([]))
+    assert str(agent_id) not in agent_manager._destroyed_agent_ids
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
+    assert [item.id for item in agent_manager.get_agents()] == [str(agent_id)]
+
+
+def test_a_destroy_tombstone_ages_out_on_its_own(agent_manager: AgentManager) -> None:
+    """A stream that never sends a full snapshot omitting the agent must not hide it for good."""
+    agent_id, _host_id, agent = _full_snapshot_with_agent("doomed")
+    agent_manager._handle_observe_event(make_full_agent_state_event([agent]))
+    agent_manager.remove_agent(str(agent_id))
+    with agent_manager._lock:
+        agent_manager._destroyed_agent_ids[str(agent_id)] = time.monotonic() - DESTROYED_TOMBSTONE_SECONDS - 1
+
+    agent_manager._handle_observe_event(make_agent_state_event(agent))
+
+    assert [item.id for item in agent_manager.get_agents()] == [str(agent_id)]
+    assert agent_manager._destroyed_agent_ids == {}
 
 
 def test_get_agent_info_by_id_resolves_from_state(agent_manager: AgentManager, tmp_path: Path) -> None:

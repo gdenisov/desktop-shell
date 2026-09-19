@@ -21,9 +21,10 @@ Manifests
 An app with a directory ships ``system/apps/<package>/app.toml`` (see
 ``system/libs/app_manifest`` for the schema). ``--manifest <path>`` reads it
 and copies its static fields onto the row: ``display_name``, ``instances``,
-``instances_url``, ``critical``, ``priority``, ``program`` (default: the name),
-``internal``, ``launcher_rank``, ``default_shortcut``, and ``actions`` (id,
-label, and the names of the params); the icon is read from the file the
+``instances_url``, ``instance_search``, ``browses_instances``, ``critical``,
+``priority``, ``program``
+(default: the name), ``internal``, ``launcher_rank``, ``default_shortcut``, and
+``actions`` (id, label, and the names of the params); the icon is read from the file the
 manifest names, relative to the manifest. Every manifest field is authoritative
 on every call, so a re-registration with a changed manifest updates the row.
 Only what is copied from files is checked here (the name rule, the icon markup,
@@ -143,7 +144,7 @@ _ALLOWED_CONTROL_CHARACTERS = frozenset({"\t", "\n", "\r"})
 # two structured keys (``default_shortcut``, ``actions``) are handled on their
 # own. ``program`` defaults to the name when the manifest omits it.
 _MANIFEST_STRING_KEYS = ("display_name", "instances_url", "priority", "program")
-_MANIFEST_BOOL_KEYS = ("instances", "critical", "internal")
+_MANIFEST_BOOL_KEYS = ("instances", "instance_search", "browses_instances", "critical", "internal")
 _MANIFEST_INT_KEYS = ("launcher_rank",)
 
 # The registry keys a manifest owns. A manifest registration rewrites every one
@@ -153,6 +154,8 @@ _MANIFEST_OWNED_KEYS = (
     "display_name",
     "instances",
     "instances_url",
+    "instance_search",
+    "browses_instances",
     "critical",
     "priority",
     "program",
@@ -692,8 +695,8 @@ def main() -> None:
         "--manifest",
         help=(
             "Path to the app's app.toml. Its name, icon, and static fields (display_name, "
-            "instances, instances_url, critical, priority, program, internal, default_shortcut, "
-            "actions) are copied onto the row on every call."
+            "instances, instances_url, instance_search, browses_instances, critical, priority, program, internal, "
+            "default_shortcut, actions) are copied onto the row on every call."
         ),
     )
     parser.add_argument(

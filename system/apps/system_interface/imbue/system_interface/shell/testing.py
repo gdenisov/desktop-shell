@@ -23,8 +23,11 @@ from pydantic import Field
 
 from imbue.system_interface.server import create_application
 from imbue.system_interface.shell.data_types import LayoutRecord
-from imbue.system_interface.shell.data_types import instance_panel_params_by_id
-from imbue.system_interface.shell.data_types import instance_panel_params_json
+from imbue.system_interface.shell.data_types import windows_of
+from imbue.system_interface.shell.desktop_document import NOMINAL_DESKTOP_SIZE
+from imbue.system_interface.shell.desktop_document import DesktopDocument
+from imbue.system_interface.shell.desktop_document import DesktopWindow
+from imbue.system_interface.shell.desktop_document import cascade_rect
 from imbue.system_interface.shell.inventory import AppInventory
 from imbue.system_interface.shell.inventory import FetchOutcomeKind
 from imbue.system_interface.shell.inventory import InstanceFetchOutcome
@@ -56,6 +59,8 @@ def registry_row_toml(
     label: str = "",
     action_params: Mapping[str, Sequence[str]] | None = None,
     launcher_rank: int | None = None,
+    instance_search: bool = False,
+    browses_instances: bool = False,
 ) -> str:
     """One ``[[apps]]`` row as ``forward_port.py`` writes it, with the manifest-derived keys the shell reads.
     ``action_params`` names each action's params by action id."""
@@ -66,6 +71,8 @@ def registry_row_toml(
         f'label = "{label}"',
         f'display_name = "{display_name if display_name is not None else name.capitalize()}"',
         f"instances = {'true' if is_multi_instance else 'false'}",
+        f"instance_search = {'true' if instance_search else 'false'}",
+        f"browses_instances = {'true' if browses_instances else 'false'}",
         f"critical = {'true' if is_critical else 'false'}",
         f"internal = {'true' if is_internal else 'false'}",
     ]
@@ -120,6 +127,7 @@ def instance_record(
     status: InstanceStatus = InstanceStatus.IDLE,
     lifetime: InstanceLifetime = InstanceLifetime.EXPLICIT,
     url: str = "/",
+    is_stoppable: bool = False,
 ) -> InstanceRecord:
     return InstanceRecord(
         key=InstanceKey(key),
@@ -129,6 +137,7 @@ def instance_record(
         lifetime=lifetime,
         last_active=datetime(2026, 9, 4, tzinfo=timezone.utc),
         renameable=True,
+        stoppable=is_stoppable,
     )
 
 
@@ -198,36 +207,33 @@ def drain_messages(client_queue: "queue.Queue[str | None]") -> list[dict[str, An
     return messages
 
 
-def addresses_by_panel_id(dockview: dict[str, Any] | None) -> dict[str, Address]:
-    """Each instance panel's address, keyed by dockview panel id: how the layout assertions read a document."""
-    return {panel_id: params.address for panel_id, params in instance_panel_params_by_id(dockview).items()}
+def page_id_for_test(index: int) -> TabId:
+    """The fixed page id the test desktops give their ``index``-th window."""
+    return TabId(f"tab-{index:016x}")
+
+
+def addresses_of_layout(layout: LayoutRecord) -> list[Address]:
+    """Every address the layout's desktop shows, bottom of the stack first: how the layout assertions read one."""
+    return [window.address for window in windows_of(layout)]
+
+
+def desktop_showing(*addresses: Address) -> DesktopDocument:
+    """A desktop with one cascaded window per address, in the order given, each under a fixed page id."""
+    windows = tuple(
+        DesktopWindow(
+            tab_id=page_id_for_test(index),
+            address=address,
+            rect=cascade_rect(index, NOMINAL_DESKTOP_SIZE),
+        )
+        for index, address in enumerate(addresses)
+    )
+    return DesktopDocument(windows=windows, desktop_size=NOMINAL_DESKTOP_SIZE)
 
 
 def layout_showing(*addresses: Address) -> LayoutRecord:
-    """A desktop arrangement with one panel per address (``p0``, ``p1``, ...), each panel's params carrying a fixed tab id."""
-    panels = {
-        f"p{index}": {"id": f"p{index}", "params": instance_panel_params_json(address, TabId(f"tab-{index:016x}"), 0)}
-        for index, address in enumerate(addresses)
-    }
+    """A client layout whose desktop shows one window per address; a never-arranged layout when given none."""
     return LayoutRecord(
-        dockview={
-            "grid": {
-                "root": {
-                    "type": "branch",
-                    "data": [
-                        {"type": "leaf", "data": {"views": list(panels), "activeView": "p0", "id": "g0"}, "size": 1200}
-                    ],
-                    "size": 800,
-                },
-                "width": 1200,
-                "height": 800,
-                "orientation": "HORIZONTAL",
-            },
-            "panels": panels,
-            "activeGroup": "g0",
-        }
-        if addresses
-        else None,
+        desktop=desktop_showing(*addresses) if addresses else None,
         device_kind=DeviceKind.DESKTOP,
         updated_at=None,
     )

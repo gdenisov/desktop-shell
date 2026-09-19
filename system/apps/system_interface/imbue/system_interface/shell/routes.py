@@ -12,6 +12,7 @@ from app_instances.blueprint import answer_typed_error
 from app_instances.blueprint import parse_request_body
 from app_instances.errors import AppInstancesError
 from app_instances.primitives import InstanceKey
+from app_instances.primitives import SearchQuery
 from app_manifest.manifest import ShortcutMode
 from app_manifest.primitives import ActionId
 from app_manifest.primitives import AppName
@@ -25,6 +26,7 @@ from pydantic import Field
 from pydantic import ValidationError
 
 from imbue.imbue_common.frozen_model import FrozenModel
+from imbue.imbue_common.model_update import to_update
 from imbue.system_interface.app_context import get_state
 from imbue.system_interface.shell.client_activity import find_client_id_for_instance
 from imbue.system_interface.shell.client_activity import summarize_client_activity
@@ -35,15 +37,16 @@ from imbue.system_interface.shell.data_types import LayoutRecord
 from imbue.system_interface.shell.data_types import LayoutSaveRequest
 from imbue.system_interface.shell.data_types import Shortcut
 from imbue.system_interface.shell.data_types import TabInstanceReport
+from imbue.system_interface.shell.data_types import desktop_of
 from imbue.system_interface.shell.data_types import effective_actions
-from imbue.system_interface.shell.data_types import instance_panel_params_by_id
-from imbue.system_interface.shell.dockview_document import Direction
-from imbue.system_interface.shell.dockview_document import Placement
-from imbue.system_interface.shell.dockview_document import add_panel
-from imbue.system_interface.shell.dockview_document import focus_panel
-from imbue.system_interface.shell.dockview_document import move_panel
-from imbue.system_interface.shell.dockview_document import panel_id_for_address
-from imbue.system_interface.shell.dockview_document import remove_panel
+from imbue.system_interface.shell.data_types import windows_of
+from imbue.system_interface.shell.desktop_document import DesktopDocument
+from imbue.system_interface.shell.desktop_document import add_window
+from imbue.system_interface.shell.desktop_document import focus_window
+from imbue.system_interface.shell.desktop_document import minimize_window
+from imbue.system_interface.shell.desktop_document import move_window_beside
+from imbue.system_interface.shell.desktop_document import split_beside
+from imbue.system_interface.shell.desktop_document import window_for_address
 from imbue.system_interface.shell.errors import AppLifecycleRefusedError
 from imbue.system_interface.shell.errors import ClientNotFoundError
 from imbue.system_interface.shell.errors import EverythingIsNotAProjectError
@@ -54,7 +57,6 @@ from imbue.system_interface.shell.errors import InvalidShellValueError
 from imbue.system_interface.shell.errors import LayoutNotFoundError
 from imbue.system_interface.shell.errors import LayoutOpError
 from imbue.system_interface.shell.errors import NoTargetClientError
-from imbue.system_interface.shell.errors import PanelNotFoundError
 from imbue.system_interface.shell.errors import ProjectConflictError
 from imbue.system_interface.shell.errors import ProjectNotFoundError
 from imbue.system_interface.shell.errors import ProjectValueError
@@ -62,6 +64,7 @@ from imbue.system_interface.shell.errors import ShellError
 from imbue.system_interface.shell.errors import StaleLayoutSaveError
 from imbue.system_interface.shell.errors import SupervisorProgramActionError
 from imbue.system_interface.shell.errors import UnknownAppError
+from imbue.system_interface.shell.errors import WindowNotFoundError
 from imbue.system_interface.shell.instance_relay import RelayOutcome
 from imbue.system_interface.shell.instance_relay import relay_create
 from imbue.system_interface.shell.instance_relay import relay_delete
@@ -93,11 +96,12 @@ from imbue.system_interface.shell.primitives import TabId
 from imbue.system_interface.shell.primitives import ViewId
 from imbue.system_interface.shell.primitives import address_for
 from imbue.system_interface.shell.primitives import is_everything_view
-from imbue.system_interface.shell.primitives import mint_group_id
 from imbue.system_interface.shell.primitives import mint_tab_id
 from imbue.system_interface.shell.projects import project_wire_json
 from imbue.system_interface.shell.projects import seed_shortcuts
 from imbue.system_interface.shell.projects import validated_shortcut
+from imbue.system_interface.shell.search import search_everything_started
+from imbue.system_interface.shell.search import search_wire_json
 from imbue.system_interface.shell.state import ShellState
 
 LOOPBACK_CLIENT_HOSTS: Final[frozenset[str]] = frozenset({"127.0.0.1", "::1", "localhost"})
@@ -156,7 +160,7 @@ def _answer_shell_error(error: ShellError) -> ResponseReturnValue:
             | UnknownAppError()
             | EverythingIsNotAProjectError()
             | ClientNotFoundError()
-            | PanelNotFoundError()
+            | WindowNotFoundError()
             | InstanceNotListedError()
         ):
             return _detail(str(error), HTTP_NOT_FOUND)
@@ -240,15 +244,18 @@ def tab_instance(tab_id: str) -> ResponseReturnValue:
     if not found:
         raise LayoutNotFoundError(f"No tab {tab_id!r} in any client layout")
     for found_tab in found:
-        shown = found_tab.params.address
+        shown = found_tab.window.address
         if shown.app != report.app:
             return _detail(f"tab {tab_id!r} shows {shown}, not the app {report.app!r}", HTTP_BAD_REQUEST)
     address = address_for(report.app, None if report.key == "" else InstanceKey(report.key))
+    # The list first, then the rebind: a window told to show an instance the shell does not list
+    # yet (a chat just created, shown in the window that made it) drops its page and loads it
+    # again once the list arrives, so the list must arrive first.
+    shell.inventory.refetch_now(str(report.app))
     for stored in shell.rebind_tab(TabId(tab_id), address):
         if not is_everything_view(stored.view_id):
             shell.projects.add_tab(stored.view_id, address)
     shell.broadcast_projects_updated()
-    shell.inventory.refetch_now(str(report.app))
     return "", HTTP_NO_CONTENT
 
 
@@ -499,15 +506,27 @@ def list_clients() -> ResponseReturnValue:
     )
 
 
+def search_everything() -> ResponseReturnValue:
+    """Everything the user has started that matches, running or stopped (contracts.md section 6).
+
+    A blank query is not a refusal: the desktop asks on every keystroke, and clearing the field
+    is how the user goes back to the launcher's own buttons.
+    """
+    raw_query = (request.args.get("q") or "").strip()
+    if not raw_query:
+        return jsonify(search_wire_json([]))
+    shell = _shell()
+    results = search_everything_started(shell.http_client, shell.inventory.entries(), SearchQuery(raw_query))
+    return jsonify(search_wire_json(results))
+
+
 def inventory_document() -> ResponseReturnValue:
     shell = _shell()
     clients = shell.clients.list_clients()
     docked_by_client_id = {
         str(client.id): [
-            params.address
-            for params in instance_panel_params_by_id(
-                shell.layouts.read_layout(client.active_view, client.id, client.device_kind).dockview
-            ).values()
+            window.address
+            for window in windows_of(shell.layouts.read_layout(client.active_view, client.id, client.device_kind))
         ]
         for client in clients
     }
@@ -696,6 +715,12 @@ def register_shell_routes(application: Flask) -> None:
         endpoint="inventory_document",
     )
     application.add_url_rule(
+        "/api/search",
+        view_func=search_everything,
+        methods=["GET"],
+        endpoint="search_everything",
+    )
+    application.add_url_rule(
         "/api/layout/broadcast",
         view_func=layout_broadcast,
         methods=["POST"],
@@ -850,11 +875,11 @@ def _op_inspect(shell: ShellState, args_raw: dict[str, Any], requester: Address 
         layout = shell.materialize_client_layout(ViewId(view_id), client_id)
     summary = layout_inspect(layout, _title_by_address(shell))
     logger.info(
-        "layout op=inspect requester={} view={} client={} panels={}",
+        "layout op=inspect requester={} view={} client={} windows={}",
         requester,
         view_id,
         client_id,
-        len(summary["panels"]),
+        len(summary["windows"]),
     )
     return jsonify({"ok": True, "view_id": view_id, "client_id": client_id, "layout": summary})
 
@@ -922,11 +947,12 @@ def _resolve_op_address(raw: str, requester: Address | None) -> Address:
     return Address(raw)
 
 
-def _require_panel(layout: LayoutRecord, address: Address) -> str:
-    panel_id = panel_id_for_address(layout, address)
-    if panel_id is None:
-        raise PanelNotFoundError(f"{address} is not open in this arrangement")
-    return panel_id
+def _require_window(layout: LayoutRecord, address: Address) -> TabId:
+    """The page of the window showing ``address`` on this desktop; a 404 when no window does."""
+    window = window_for_address(desktop_of(layout), address)
+    if window is None:
+        raise WindowNotFoundError(f"{address} has no window on this desktop")
+    return window.tab_id
 
 
 def _create_action_id(entry: AppInventoryEntry, arguments: DocumentOpArguments) -> str:
@@ -989,50 +1015,38 @@ def _relay_detail(outcome: RelayOutcome) -> str:
     return outcome.body.decode(errors="replace")
 
 
-def _anchor_panel_id(layout: LayoutRecord, raw_anchor: str, requester: Address | None) -> str:
-    """The panel a split or a move is relative to; ``self`` must be docked for that to mean anything."""
+def _anchor_tab_id(layout: LayoutRecord, raw_anchor: str, requester: Address | None) -> TabId:
+    """The window a split or a move is relative to; ``self`` must have a window for that to mean anything."""
     address = _resolve_op_address(raw_anchor, requester)
-    return _require_panel(layout, address)
+    return _require_window(layout, address)
 
 
-def _anchored_placement(layout: LayoutRecord, arguments: DocumentOpArguments, requester: Address | None) -> Placement:
-    """The placement a split or a move posts: relative to its anchor, in its direction."""
-    return Placement(
-        anchor_panel_id=_anchor_panel_id(layout, arguments.relative_to, requester),
-        direction=arguments.direction,
-        ratio=arguments.ratio,
-        is_new_group=arguments.new_group,
-        group_id=mint_group_id(),
-    )
+def _opening_anchor_tab_id(
+    layout: LayoutRecord, op: str, arguments: DocumentOpArguments, requester: Address | None
+) -> TabId | None:
+    """The window a newly opened window tiles against, or None to cascade it instead.
 
+    The two creating ops differ in how badly they want an anchor:
 
-def _docking_placement(
-    layout: LayoutRecord,
-    op: str,
-    arguments: DocumentOpArguments,
-    requester: Address | None,
-) -> Placement:
-    """Where ``open`` and ``split`` dock: open lands beside the requester's own instance when it is docked, and into the
-    client's active group when there is no such anchor; split follows its anchor and direction.
+    - ``split`` was *asked* for a tiling against a named window, so a missing anchor is the op's
+      error -- tiling against nothing is not what the caller meant, and opening the window
+      somewhere else instead would quietly do the wrong thing.
+    - ``open`` tiles as a *preference*. The user asked for an app an agent opens to land beside
+      the chat that opened it rather than cascaded on top of it, so an open with a requester
+      whose window is on this desktop tiles against that window. With no requester (a loopback
+      caller, a test), or a requester with no window here, there is nothing to sit beside and the
+      window cascades exactly as it used to. Never an error: an open must always open.
 
-    "Beside" needs something to be beside. With a docked requester it is that panel, and the op tabs into whatever group
-    already lies to its right (unless ``new_group``) -- an agent asking for a tab next to its own chat. With no docked
-    anchor -- the reactor surfacing an app-launched chat, or any agent surfacing its *own* chat, which by definition is
-    not docked yet -- the fallback anchor is the active group, and "beside" it means a column split whenever it is the
-    rightmost, which it usually is. Those callers all want the tab where the user is already looking, so they get the
-    active group itself. ``new_group`` still overrides, since ``_dock`` honours a direction over that flag.
+    The op's arguments carry the anchor either way (``relative_to`` defaults to ``self`` and
+    ``direction`` to the right), so an open that names them explicitly is honoured too.
     """
     if op == "split":
-        return _anchored_placement(layout, arguments, requester)
-    requester_panel = panel_id_for_address(layout, requester) if requester is not None else None
-    is_anchored = requester_panel is not None or arguments.new_group
-    return Placement(
-        anchor_panel_id=requester_panel,
-        direction=Direction.RIGHT if is_anchored else Direction.WITHIN,
-        ratio=arguments.ratio,
-        is_new_group=arguments.new_group,
-        group_id=mint_group_id(),
-    )
+        return _anchor_tab_id(layout, arguments.relative_to, requester)
+    anchor_address = _resolve_op_address(arguments.relative_to, requester) if requester is not None else None
+    if anchor_address is None:
+        return None
+    anchor_window = window_for_address(desktop_of(layout), anchor_address)
+    return anchor_window.tab_id if anchor_window is not None else None
 
 
 class _DocumentOpTarget(FrozenModel):
@@ -1059,7 +1073,7 @@ def _prepare_docking_target(
         raise UnknownAppError(f"No registered app named {address.app!r}")
     if address.key is None and entry.row.instances:
         if op == "split":
-            _anchor_panel_id(snapshot, arguments.relative_to, requester)
+            _anchor_tab_id(snapshot, arguments.relative_to, requester)
         created = _create_through_relay(shell, entry, arguments)
         return _DocumentOpTarget(address=created.address, title=created.title, created=created.address)
     found = shell.inventory.find_instance(address)
@@ -1086,24 +1100,45 @@ def _prepare_op_target(
     )
 
 
-def _dock_target(
+def _with_desktop(layout: LayoutRecord, desktop: DesktopDocument) -> LayoutRecord:
+    return layout.model_copy_update(to_update(layout.field_ref().desktop, desktop))
+
+
+def _open_target(
     layout: LayoutRecord,
     op: str,
     target: _DocumentOpTarget,
     arguments: DocumentOpArguments,
     requester: Address | None,
 ) -> LayoutRecord:
-    """``open`` or ``split`` over the arrangement as it is at the write: an address it already shows is focused, a
-    listed one is docked per the op's placement, and one that is neither is not open anywhere."""
-    already_open = panel_id_for_address(layout, target.address)
-    if already_open is not None:
-        return focus_panel(layout, already_open)
-    placement = _docking_placement(layout, op, arguments, requester)
+    """``open`` or ``split`` over the desktop as it is at the write.
+
+    An instance that already has a window is raised rather than opened twice, since an instance
+    has one page. Both ops tile the new window against an anchor, which resizes the anchor too --
+    an app an agent opens lands beside the chat that opened it, so both are readable at once
+    instead of the new one covering the conversation that asked for it. They differ only in how
+    the anchor is found and in what happens when there is none: see ``_opening_anchor_tab_id``.
+    An ``open`` with nothing to sit beside falls back to cascading the window.
+    """
+    desktop = desktop_of(layout)
+    open_window = window_for_address(desktop, target.address)
+    if open_window is not None:
+        return _with_desktop(layout, focus_window(desktop, open_window.tab_id))
+    # A split's anchor is settled before anything else, so an op that names an anchor it does not
+    # have is reported as that rather than as the instance it was going to open.
+    anchor_tab_id = _opening_anchor_tab_id(layout, op, arguments, requester)
     if target.title is None:
         raise InstanceNotListedError(
             f"No app lists an instance at {target.address}; run `layout.py list` to see every one"
         )
-    return add_panel(layout, target.address, mint_tab_id(), target.title, placement)
+    if anchor_tab_id is not None:
+        return _with_desktop(
+            layout,
+            split_beside(
+                desktop, anchor_tab_id, target.address, mint_tab_id(), arguments.direction, arguments.ratio
+            ),
+        )
+    return _with_desktop(layout, add_window(desktop, target.address, mint_tab_id(), None))
 
 
 def _edit_layout_for_op(
@@ -1113,18 +1148,25 @@ def _edit_layout_for_op(
     arguments: DocumentOpArguments,
     requester: Address | None,
 ) -> LayoutRecord:
-    """The arrangement with ``op`` applied. Pure over the layout it is handed, which is the stored one at the moment of
-    the write (the panel ids are resolved on it, not on the snapshot the op was prepared over)."""
+    """The desktop with ``op`` applied. Pure over the layout it is handed, which is the stored one at the moment of
+    the write (the windows are resolved on it, not on the snapshot the op was prepared over)."""
     if is_creating_op(op):
-        return _dock_target(layout, op, target, arguments, requester)
-    panel_id = _require_panel(layout, target.address)
+        return _open_target(layout, op, target, arguments, requester)
+    desktop = desktop_of(layout)
+    tab_id = _require_window(layout, target.address)
     match op:
         case "focus":
-            return focus_panel(layout, panel_id)
+            return _with_desktop(layout, focus_window(desktop, tab_id))
+        # Putting a window away IS minimize on a desktop: the instance keeps running and stays in
+        # the dock, dimmed. ``layout.py stop`` is the verb for ending what a window shows.
         case "close":
-            return remove_panel(layout, panel_id)
+            return _with_desktop(layout, minimize_window(desktop, tab_id))
         case "move":
-            return move_panel(layout, panel_id, _anchored_placement(layout, arguments, requester))
+            anchor_tab_id = _anchor_tab_id(layout, arguments.relative_to, requester)
+            return _with_desktop(
+                layout,
+                move_window_beside(desktop, tab_id, anchor_tab_id, arguments.direction, arguments.ratio),
+            )
         case _:
             raise ShellError(f"Op {op!r} has no document handler")
 
@@ -1158,8 +1200,6 @@ def _op_document(
     if is_creating_op(op) and not is_everything_view(view_id):
         shell.projects.add_tab(view_id, target.address)
         shell.broadcast_projects_updated()
-    if op == "close":
-        shell.delete_unreferenced_instances()
     if _requested_view(args_raw) is not None and _active_view_of_client(shell, client_id) != str(view_id):
         shell.set_client_active_view(client_id, view_id)
     logger.info(

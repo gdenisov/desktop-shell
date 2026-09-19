@@ -184,6 +184,13 @@ class AppLifecycleAction(LowerCaseStrEnum):
     START = auto()
 
 
+class MatchedOn(LowerCaseStrEnum):
+    """Why a search result matched: its title, or something inside it (a wire value)."""
+
+    TITLE = auto()
+    CONTENT = auto()
+
+
 class DeviceKind(LowerCaseStrEnum):
     """Which arrangement a client saves into: desktop or mobile (a wire value)."""
 

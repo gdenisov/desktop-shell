@@ -2,10 +2,11 @@ from typing import Any
 
 from imbue.system_interface.shell.data_types import LayoutRecord
 from imbue.system_interface.shell.data_types import LayoutSaveRequest
+from imbue.system_interface.shell.data_types import as_desktop_layout_body
+from imbue.system_interface.shell.data_types import desktop_of
 from imbue.system_interface.shell.data_types import fold_legacy_tabs_into_dockview
-from imbue.system_interface.shell.data_types import instance_panel_params_by_id
-from imbue.system_interface.shell.data_types import instance_panel_params_json
-from imbue.system_interface.shell.data_types import with_panel_params_address
+from imbue.system_interface.shell.data_types import windows_of
+from imbue.system_interface.shell.desktop_document import EMPTY_DESKTOP
 from imbue.system_interface.shell.primitives import Address
 from imbue.system_interface.shell.primitives import DeviceKind
 from imbue.system_interface.shell.primitives import TabId
@@ -16,45 +17,101 @@ _TAB_A = TabId("tab-000000000000000a")
 _TAB_B = TabId("tab-000000000000000b")
 
 
+def _panel_params(address: Address, tab_id: TabId, last_focused_ms: int) -> dict[str, Any]:
+    """The params a dockview panel carried, as the shell that wrote them spelled them."""
+    return {
+        "kind": "instance",
+        "address": str(address),
+        "tabId": str(tab_id),
+        "lastFocusedMs": last_focused_ms,
+    }
+
+
 def _dockview(panels: dict[str, Any]) -> dict[str, Any]:
     return {"grid": {"root": {"type": "branch", "data": []}}, "panels": panels, "activeGroup": "g1"}
 
 
-def test_instance_panel_params_are_read_off_the_dockview_document_skipping_launchers_and_damage() -> None:
-    dockview = _dockview(
+def test_a_saved_dockview_arrangement_reads_as_a_desktop_of_windows() -> None:
+    """Every docked tab becomes a window; a New Tab panel and a damaged one have no counterpart."""
+    body = {
+        "dockview": _dockview(
+            {
+                "pa": {"id": "pa", "params": _panel_params(_FILES, _TAB_A, 7)},
+                "pb": {"id": "pb", "params": {**_panel_params(_TERMINAL_1, _TAB_B, 99), "future": True}},
+                "new-tab-1": {"id": "new-tab-1", "params": {"kind": "launcher"}},
+                "damaged": {"id": "damaged", "params": {"kind": "instance", "address": "not-an-address"}},
+                "bare": {"id": "bare"},
+                "junk": "not a dict",
+            }
+        ),
+        "device_kind": "desktop",
+        "updated_at": None,
+    }
+    layout = LayoutRecord.model_validate(body)
+    windows = windows_of(layout)
+    assert [window.address for window in windows] == [_FILES, _TERMINAL_1]
+    assert [window.tab_id for window in windows] == [_TAB_A, _TAB_B]
+    # The tab that was looked at most recently comes back on top, which is last in the stack.
+    assert windows[-1].address == _TERMINAL_1
+    # The windows are cascaded rather than stacked on one spot.
+    assert windows[0].rect.x != windows[1].rect.x and windows[0].rect.y != windows[1].rect.y
+    assert all(not window.is_minimized and not window.is_maximized for window in windows)
+    # Nothing of the grid survives into what is written back.
+    assert "dockview" not in layout.model_dump(mode="json")
+
+
+def test_a_migrated_window_keeps_the_name_its_tab_carried() -> None:
+    """The name the tab carried comes across, so a migrated window whose instance has since gone
+    still knows what it was called instead of falling back to its app's name."""
+    layout = LayoutRecord.model_validate(
         {
-            "pa": {"id": "pa", "params": instance_panel_params_json(_FILES, _TAB_A, 7)},
-            # A key the browser added that the shell does not know is tolerated.
-            "pb": {"id": "pb", "params": {**instance_panel_params_json(_TERMINAL_1, _TAB_B, 0), "future": True}},
-            "new-tab-1": {"id": "new-tab-1", "params": {"kind": "launcher"}},
-            "damaged": {"id": "damaged", "params": {"kind": "instance", "address": "not-an-address"}},
-            "bare": {"id": "bare"},
-            "junk": "not a dict",
+            "dockview": _dockview(
+                {
+                    # The name the user gave it wins over the one its app gave it.
+                    "pa": {
+                        "id": "pa",
+                        "params": {**_panel_params(_FILES, _TAB_A, 1), "title": "Files", "customTitle": "Notes"},
+                    },
+                    "pb": {"id": "pb", "params": {**_panel_params(_TERMINAL_1, _TAB_B, 2), "title": "Build log"}},
+                }
+            ),
+            "device_kind": "desktop",
+            "updated_at": None,
         }
     )
-    parsed = instance_panel_params_by_id(dockview)
-    assert set(parsed) == {"pa", "pb"}
-    assert parsed["pa"].address == _FILES and parsed["pa"].tab_id == _TAB_A and parsed["pa"].last_focused_ms == 7
-    assert parsed["pb"].address == _TERMINAL_1 and parsed["pb"].last_focused_ms == 0
-    assert instance_panel_params_by_id(None) == {}
-    assert instance_panel_params_by_id({"panels": []}) == {}
+
+    assert [window.last_known_title for window in windows_of(layout)] == ["Notes", "Build log"]
 
 
-def test_repointing_a_panel_keeps_every_other_key_of_its_params() -> None:
-    dockview = _dockview({"pa": {"id": "pa", "params": {**instance_panel_params_json(_FILES, _TAB_A, 7), "extra": 1}}})
-    repointed = with_panel_params_address(dockview, "pa", _TERMINAL_1)
-    assert repointed["panels"]["pa"]["params"] == {
-        "kind": "instance",
-        "address": str(_TERMINAL_1),
-        "tabId": str(_TAB_A),
-        "lastFocusedMs": 7,
-        "extra": 1,
-    }
-    # Pure: the input is left as it was.
-    assert dockview["panels"]["pa"]["params"]["address"] == str(_FILES)
+def test_a_migrated_window_with_no_name_to_carry_has_none() -> None:
+    layout = LayoutRecord.model_validate(
+        {
+            "dockview": _dockview({"pa": {"id": "pa", "params": {**_panel_params(_FILES, _TAB_A, 1), "title": ""}}}),
+            "device_kind": "desktop",
+            "updated_at": None,
+        }
+    )
+
+    assert windows_of(layout)[0].last_known_title is None
 
 
-def test_a_layout_in_the_older_shape_reads_as_params_only() -> None:
+def test_an_arrangement_that_docked_one_instance_twice_becomes_one_window() -> None:
+    layout = LayoutRecord.model_validate(
+        {
+            "dockview": _dockview(
+                {
+                    "pa": {"id": "pa", "params": _panel_params(_FILES, _TAB_A, 1)},
+                    "pb": {"id": "pb", "params": _panel_params(_FILES, _TAB_B, 2)},
+                }
+            ),
+            "device_kind": "desktop",
+            "updated_at": None,
+        }
+    )
+    assert [window.address for window in windows_of(layout)] == [_FILES]
+
+
+def test_a_layout_in_the_oldest_shape_is_read_through_its_tabs_block() -> None:
     """A file written before params-only layouts carried a ``tabs`` block, which was the truth of each panel's identity."""
     legacy = {
         "dockview": _dockview(
@@ -76,28 +133,21 @@ def test_a_layout_in_the_older_shape_reads_as_params_only() -> None:
         "updated_at": None,
     }
     layout = LayoutRecord.model_validate(legacy)
-    assert layout.dockview is not None
-    assert layout.dockview["panels"]["pa"]["params"] == {
-        "kind": "instance",
-        "address": str(_FILES),
-        "tabId": str(_TAB_A),
-        "lastFocusedMs": 7,
-    }
-    # A record for a panel the grid no longer names is dropped; the launcher and the orphan are left alone.
-    assert set(layout.dockview["panels"]) == {"pa", "new-tab-1", "orphan"}
-    assert "params" not in layout.dockview["panels"]["orphan"]
-    assert set(instance_panel_params_by_id(layout.dockview)) == {"pa"}
-    assert "tabs" not in layout.model_dump(mode="json")
+    window = windows_of(layout)[0]
+    assert window.address == _FILES and window.tab_id == _TAB_A
+    # A record for a panel the grid no longer names is dropped.
+    assert len(windows_of(layout)) == 1
 
-    # The empty legacy layout, and a body with no ``tabs`` at all, read unchanged.
+    # The empty legacy layout, and a body with no ``tabs`` at all, read as a view never arranged.
     assert LayoutRecord.model_validate(
         {"dockview": None, "tabs": {}, "device_kind": "desktop", "updated_at": None}
-    ) == LayoutRecord(dockview=None, device_kind=DeviceKind.DESKTOP, updated_at=None)
-    current = {"dockview": None, "device_kind": "desktop", "updated_at": None}
+    ) == LayoutRecord(desktop=None, device_kind=DeviceKind.DESKTOP, updated_at=None)
+    current = {"desktop": None, "device_kind": "desktop", "updated_at": None}
     assert fold_legacy_tabs_into_dockview(current) is current
-    assert fold_legacy_tabs_into_dockview("not a mapping") == "not a mapping"
+    assert as_desktop_layout_body(current) is current
+    assert as_desktop_layout_body("not a mapping") == "not a mapping"
 
-    # The save body takes the same fold.
+    # The save body takes the same reading, so a window that saves before it reloads is understood.
     request = LayoutSaveRequest.model_validate(
         {
             "client_id": "c1",
@@ -107,4 +157,11 @@ def test_a_layout_in_the_older_shape_reads_as_params_only() -> None:
             "tabs": legacy["tabs"],
         }
     )
-    assert instance_panel_params_by_id(request.dockview)["pa"].address == _FILES
+    assert request.desktop is not None
+    assert request.desktop.windows[0].address == _FILES
+
+
+def test_a_view_never_arranged_reads_as_an_empty_desktop() -> None:
+    layout = LayoutRecord(desktop=None, device_kind=DeviceKind.DESKTOP, updated_at=None)
+    assert windows_of(layout) == ()
+    assert desktop_of(layout) == EMPTY_DESKTOP

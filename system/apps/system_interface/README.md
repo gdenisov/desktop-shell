@@ -1,7 +1,7 @@
 # System Interface
 
 The workspace's shell: its window manager and app management. It serves one
-document (`/`, the dockview UI) that arranges tabs, keeps projects, and
+document (`/`, the desktop) that arranges floating windows, keeps projects, and
 manages apps, and it knows every app only through the workspace app model: a
 manifest, a registry row, an instances API, and the browser-side contract.
 This package imports nothing from mngr or from any app, never runs the `mngr`
@@ -26,9 +26,10 @@ format. In brief:
   list of addresses), a name, a color, a glyph, and its rail **shortcuts**
   (`(app, action)` rows in focus or new mode); Everything is the unfiltered
   view of the whole machine.
-- A **layout** is one client's arrangement of one view. A **client** is one
-  browser context, identified by a stored id, with a device kind. Truth is
-  shared, arrangement is scoped.
+- A **layout** is one client's desktop for one view: the windows it holds with
+  their geometry and stacking order, where its icons sit, and whether the dock
+  hides itself. A **client** is one browser context, identified by a stored id,
+  with a device kind. Truth is shared, arrangement is scoped.
 - **Status** (`working`, `idle`, `attention`, `stopped`, `error`), titles,
   icons, and recency all come from the apps. The shell stores no titles, no
   recency, and no locations of its own.
@@ -38,7 +39,7 @@ format. In brief:
 The `system-interface` tool (the shell's own uv tool environment, run by
 supervisord from the repo root) listens on `http://127.0.0.1:8000` and serves:
 
-- `/` and the SPA catch-all: the dockview UI, built into
+- `/` and the SPA catch-all: the desktop, built into
   `imbue/system_interface/static/`; `/assets/<path>` for its bundle.
 - `/api/health`: `{"status", "is_frontend_built"}`, the probe the update
   apply and the preview flow poll.
@@ -49,7 +50,8 @@ supervisord from the repo root) listens on `http://127.0.0.1:8000` and serves:
   (`.../instances`, `.../instances/<key>/rename|delete|location|stop|start`),
   projects (`/api/projects/...`), layouts (`/api/layouts/<view>`), clients,
   tabs (`/api/tabs/<tab_id>/instance`), client activity, the inventory
-  (`/api/inventory`), and the loopback-only op route (`/api/layout/broadcast`).
+  (`/api/inventory`), the desktop's search (`/api/search`), and the
+  loopback-only op route (`/api/layout/broadcast`).
 - The WebSocket (`/api/ws`): `apps_updated`, `projects_updated`,
   `layout_updated`, `active_view_changed`, `tab_rebound`, `layout_op`
   (contracts section 8).
@@ -60,8 +62,8 @@ Its state lives under `data/.state/system_interface/`: `projects.json`,
 (`events/client_activity/events.jsonl`, what `layout.py context` reads).
 
 The backend is the `imbue/system_interface/shell/` subpackage (inventory,
-relay, projects, layouts, clients, client activity, layout ops, the pure
-dockview document editor, routes, state); the package root holds the process
+relay, projects, layouts, clients, client activity, layout ops, search, the pure
+desktop document editor, routes, state); the package root holds the process
 (`main.py`, `server.py`), the not-built placeholder, and the update-staleness
 check. The frontend (`frontend/`) is one member of the npm workspace rooted at
 `system/package.json`; the design system, the base helpers, and the contract
@@ -90,46 +92,113 @@ through the contract module (`shell:open`, `shell:focused`, `shell:location`);
 a page that reports the path it is showing gets it stored on its own record
 and reopens there.
 
-### Views, layouts, and the New Tab page
+### The desktop, and what it is made of
 
-Every open in a project files the address into its tab set, whichever way it
-was opened; "Remove from project" unfiles it. Each client keeps its own
-arrangement of each view: the browser saves the user's gestures with a save
-id and the stamp it was based on (a save over a newer arrangement is refused
-with 409 and the window refetches), the shell writes the file for agent ops
-and deletes, and every write is announced as `layout_updated` so the
-client's other windows mirror it. The active view lives on the client record.
-A tab leaves its tab sets and layouts only when its instance is deleted through
-the shell; one whose app stops listing it stays, shown as unavailable, and
-reconnects when the app lists it again. An instance whose record says
-`lifetime = "referenced"` is deleted through its app once nothing references it.
+The shell is a desktop: a white surface carrying launcher icons, floating
+windows, and a dock along the bottom.
 
-The rail shows the view's identity (the switcher; right-click for project
-settings), its shortcut rows (seeded from every app's `default_shortcut`;
-Everything's rail is every app's primary action), the "All apps" popover, a
-search pill, and the view's tab list. The New Tab page is
-the only empty state, and the page for starting things. It is an ordinary tab:
-the "+" opens another no matter how many are already up, in one pane or across
-panes, and one stays open until it is closed or answered -- by opening something
-from inside it, or by a tab docking into the pane where it was the only tab. Its
-contents: a search field; "Open
-new" (every app's primary action as a tile, four to a row, the apps that
-declare a `launcher_rank` in their manifest first in rank order and the rest
-after them); "In this project" (the tab set, with an app filter and a last-active
-column, omitted when empty); "Start something" (hardcoded intents, each a new
-chat seeded with a prompt, six at a time behind "See more"); and "Start from a
-template" (the published templates by category, in sideways rails, with a
-detail dialog whose "Make it mine" starts a chat that adopts the template).
-Typing in the search field swaps the page for results: the machine's
-instances and actions, the matching intents, the matching templates. A seeded
-prompt goes to whichever app declares an action with a `message` param (the
-chat app's `new`), so the shell still names no app. The template catalog is a
-JSON document the shell fetches from `SYSTEM_INTERFACE_TEMPLATE_CATALOG_URL`
-(`catalog/README.md` at the repo root describes it), reuses for six hours,
-keeps the last good copy under `data/.state/system_interface/`, and serves
-to the page at `GET /api/templates-catalog`; the design is
-`docs/system/blueprint/new-tab-page/plan-new-tab-page.md`. A fresh install lands
-there with no project.
+- **Icons** are "Make something" plus every non-internal app the registry
+  lists, in `launcher_rank` order, so an app built later appears with no code
+  change here. They start in a row along the top and can be dropped anywhere on
+  the desktop -- the whole width and height is a grid, so an icon lands squarely
+  in a cell and two never share one -- and where each one sits is saved with the
+  rest of the desktop. An icon is drawn back into reach when the desktop is
+  smaller than the screen it was arranged on, without being moved in the file,
+  so the arrangement comes back whole. Clicking one runs what the app declares:
+  an app whose `default_shortcut` is in `new` mode makes a new thing; one in
+  `focus` mode goes to what is already running; and one that browses its own
+  instances (`browses_instances`, which the Chats icon is) opens a window onto
+  the most recent chat that has none, because starting a chat belongs to the
+  list inside that window rather than to the icon.
+- **Windows** show one instance each, in an iframe, with a 42px title bar: the
+  app's chip, the title, then maximize, minimize and close. Drag the bar to
+  move, any edge or corner to resize, double-click the bar to maximize and the
+  title itself to rename the instance. The three verbs are the whole model:
+  **minimize** puts the window away with its page still loaded (the same state,
+  to the user, as an instance that never had a window); **close** *stops* the
+  instance, the same verb as Stop elsewhere, and never deletes it -- there is no
+  delete gesture on the desktop at all; **maximize** fills the desktop and
+  remembers where to go back to. A close verifies the stop held and retries a
+  bounded few times, because a page still attached when the stop lands can
+  recreate what was just killed (a terminal's session is `tmux new-session -A`).
+- **The dock** is what is RUNNING, derived from every app's live instance list
+  rather than from the windows this page opened, so something running with no
+  window still appears; a stopped instance does not appear at all and is found
+  through search. The one exception is an app that lists its own instances in
+  its own window (`browses_instances` in its manifest, which the chat declares):
+  the dock carries its windows instead, one tile each, because a dozen chats
+  running at once would otherwise be the whole dock. Its instances live in its
+  own list, and in search. Every tile is the diameter of the `+` button, however
+  many are running: a long row scrolls sideways rather than shrinking. Two
+  states, one glance apart: on screen, or running with nothing showing it --
+  dimmed, which is what both minimized and never-opened look like. Its
+  trailing control hides the dock.
+- **The `+`** is the one way into everything. Closed it is a round outlined
+  button; a click widens it into a field ("Search for something to open"), the
+  `+` staying as its glyph, with a menu over it: a row per app -- never for a
+  thing running in one; the search and the dock are for those -- the apps used
+  most recently first, and last, for the chat, both "Chats" (its window if it
+  has one, else a window on its latest chat) and "New Chat" (a fresh chat,
+  shown in the chat window already open rather than in a second one). Typing
+  turns the menu into the search: the app
+  rows the query names stay, and under them come the results from
+  `GET /api/search` -- everything the user has started, running or stopped, by
+  title, and, from the apps that declare `instance_search`, by what is inside
+  them (the chat app searches its own transcripts, so a chat is found by what
+  was said in it, and only by that: never by a tool it ran, a path it touched,
+  or text a skill injected). The matching text is bold and brought into view
+  in the row. Search is the only way back to anything that has been stopped,
+  and opening a stopped result starts it first. A press anywhere on the desktop
+  puts it all away; Escape in the field clears it, then closes it.
+- **The `+` menu** is the quick buttons and nothing else: one job, open one of
+  these, so it has no mode to be in.
+- **Make something** is one window holding the "Start something" intents and the
+  template catalog's own shelves. Every tile and card starts a new chat seeded
+  with a prompt, which goes to whichever app declares an action with a `message`
+  param, so the shell still names no app.
+
+Each client keeps its own desktop per view, as the layout document of
+contracts.md section 6: the browser saves the user's gestures with a save id and
+the stamp it was based on (a save over a newer arrangement is refused with 409
+and the window refetches), the shell writes the file for agent ops and deletes,
+and every write is announced as `layout_updated` so the client's other windows
+mirror it. The active view lives on the client record. Every open in a project
+files the address into its tab set. A window leaves the desktop only when its
+instance is deleted through the shell, or when the user closes a window whose
+instance is already gone; one whose app stops listing it stays, shows as
+unavailable, and reconnects when the app lists it again. An unavailable window is
+called what it was last called (the desktop document remembers it), never its
+address, and has no dock tile -- the dock is only what is running.
+
+A page outlives every window that shows it: there is one live iframe per
+instance, machine-wide, in a layer of the desktop's own, positioned over
+whichever window is showing it and stacked directly BELOW that window. Nothing
+re-parents it, which is what makes minimizing, restacking and dragging free --
+re-parenting an iframe reloads the document inside it.
+
+Below its own window, and above every window under that one, because a window
+has to be able to act over the parts of itself that overlap its page: the resize
+edges that reach in over the page's outer few pixels, and the shield that makes a
+click on a window that is not in front bring it forward rather than press what is
+under the pointer. A page above its window would take all of those, silently, and
+a page not clipped by its window would paint square corners over the window's
+rounded ones -- so the page carries the window's bottom rounding too.
+
+Projects still exist as data (the API, the tab sets and the rail shortcuts are
+untouched), but this pass gives them no desktop-level UI: the desktop shows the
+client's active view, which is Everything unless an agent's `load` moves it.
+
+What a view does that a desktop does not is worth stating plainly, because it is
+the reason the data stayed. A desktop is one person's screen on one device: it
+holds windows, it is per client, and nothing about it is shared. A view is a
+*named set of things to work on*, and it is shared -- its tab set lives on the
+server, not in a browser, so it is the same set for every client and every
+person who opens it; it carries its own shortcut rail; and it scopes an agent's
+ops (`--view`), so `open` can file an address into a project from a script with
+no window open anywhere. Each view then has its own desktop per client, which is
+why the two are separate ideas rather than one. Giving projects a face again is
+a UI question (how you switch views, how you see what is in one), not a data
+one.
 
 A workspace that predates the app model is carried over once by
 `system/scripts/migrate_workspace_layouts.py`, which bootstrap runs at every
@@ -168,7 +237,7 @@ that, tokens or not.
 
 ## Driving the workspace layout from an agent
 
-An agent inside the workspace rearranges the dockview through
+An agent inside the workspace rearranges the desktop through
 `system/scripts/layout.py` (`list / inspect / where / context / views / load /
 open / focus / split / close / move / rename / delete / stop / start /
 maximize / restore / replace-url / refresh / shortcuts / shortcut set /
@@ -184,8 +253,13 @@ python3 system/scripts/layout.py inspect --view Everything
 ```
 
 The document ops (`open`, `focus`, `split`, `close`, `move`) are applied by
-the shell to the target client's layout file and announced as
-`layout_updated`, so an op lands whether or not a browser is connected. Every
+the shell to the target client's desktop document and announced as
+`layout_updated`, so an op lands whether or not a browser is connected. On a
+desktop they mean: `open` a window (or raise the one an instance already has),
+`focus` raise it, `close` **put it away** (minimize -- `stop` is the verb that
+ends what a window shows), `split` tile the anchor and the new window into
+halves of the desktop, and `move` snap an open window beside another without
+reloading it. Every
 op targets exactly one client (`--client <id>`, else the client that last
 messaged the requesting agent, else the one connected client; refused with the
 clients listed otherwise); `--view` edits that view and switches the client to

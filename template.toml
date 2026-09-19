@@ -1,0 +1,93 @@
+# Machine-readable manifest for this template. The sibling
+# template.md holds the prose, the Requirements list, and the two
+# append-only history logs; this file is authoritative for everything
+# below. Both are generated together -- validate_template.py fails if
+# they disagree.
+format = "v2"
+
+[template]
+slug = "desktop-shell"
+title = "Desktop Shell"
+description = "A desktop workspace UI: a rearrangeable icon grid, a dock that opens into search, windows with put-away tiles, and chats as pages with an instance rail."
+thumbnail = "template.svg"
+version = "v1"
+
+# How this template is DERIVED from the workspace it came from. An
+# update re-runs this recipe rather than diffing two repos, which is what
+# keeps an exclusion excluded even though the thing still exists upstream.
+[recipe]
+include = ["system/apps/system_interface", "system/apps/chat", "system/libs/workspace_ui", "system/libs/app_instances", "system/libs/app_manifest", "system/scripts/layout.py", "system/scripts/layout_test.py", "system/scripts/migrate_workspace_layouts_test.py", "system/scripts/forward_port.py", "system/package-lock.json", ".gitignore", "system/supervisord.conf.d/system_interface.conf", "system/supervisord.conf.d/chat.conf", ".agents/skills/update-system-interface", ".agents/skills/manage-layout", ".agents/skills/update-app", ".agents/skills/build-app", ".agents/skills/assist", ".agents/skills/migrate-workspace", ".agents/shared/worker/references/type-system-interface.md", "docs/system/blueprint/workspace-app-model/contracts.md"]
+data_include = []
+exclude = [
+    "system/apps/zen_garden",
+    "system/supervisord.conf.d/zen-garden.conf",
+    "uv.lock (left at the clean base: the only change to it since the base was the excluded zen garden package, so shipping the source mind's copy would name a workspace member that is not in this tree)",
+    "data/ (all workspace data: chats, notes, memories, saved desktop layouts and icon arrangements, projects, uploads)",
+    "docs/VERSION_HISTORY.md",
+]
+modification_rules = []
+
+# Everything an adopter must deal with before this is really theirs.
+# One list -- but each entry's KIND says how it is handled, because the
+# two are handled at different times by different mechanisms:
+#
+#   permission / secret / llm = ACTIVATION. The adopting agent acts on
+#   these FIRST and BY ITSELF, initiating each latchkey permission
+#   request before asking the user anything. Every one of them must have
+#   a matching requires_ line in template.md and vice versa -- the
+#   validator checks that, because an adopter once never got prompted
+#   for a permission the app needed.
+#
+#   adaptation = worked through INTERACTIVELY with the user afterwards.
+#   Prose on both sides, so it is not cross-checked.
+#
+[requirements]
+
+# The included code reaches no third-party service, so there is no
+# [[requirements.permission]] and no [[requirements.secret]] entry: the one
+# gateway call the chat app makes (a permission scope's display name, to label
+# a permission-request card) is the latchkey gateway's own catalog endpoint,
+# authorized by credentials every agent container already has.
+
+[requirements.llm]
+method = "keyless"
+note = """The chat app runs whole agent CLIs (Claude Code, Codex, and the other \
+harnesses mngr has plugins for) as PTY sessions against a provider account the \
+user signs into from the chat page's own provider chooser; no model call is made \
+by this code and no key is baked into it, so setup is just opening a chat and \
+letting the user sign in. The same screen also accepts a pasted ANTHROPIC_API_KEY \
+(optionally with ANTHROPIC_BASE_URL for a litellm proxy), so an adopter on the \
+keyed path needs no code change either."""
+
+[[requirements.adaptation]]
+summary = "Both frontends are gitignored build output and are not in the snapshot, so until they are built once the shell serves its recovery placeholder instead of the desktop"
+resolution = "Run `cd system && npm ci && npm run build`, then `supervisorctl restart system_interface chat` -- or let the update-self apply flow build, pre-flight-boot and reload the open views"
+
+[[requirements.adaptation]]
+summary = "This overlays the adopting mind's own workspace UI, chat app, six skills and two contract documents, all of which are stock files every mind already has"
+resolution = "Re-apply any local customizations on top of these versions; a mind on a newer workspace template should diff the included skills and contracts against its own copies rather than assume they are newer"
+
+[[requirements.adaptation]]
+summary = "The desktop arrives with no arrangement: none of the publisher's chats, icon positions, window layouts or projects were included"
+resolution = "Nothing to restore -- the default icon row and an empty desktop are the correct first boot, and the arrangement becomes the adopter's as soon as they move anything"
+
+[[requirements.adaptation]]
+summary = "The icon grid is whatever apps the adopting mind's registry lists, in launcher_rank order, not the publisher's set of apps"
+resolution = "Set `launcher_rank` (or `internal`) in an app's own app.toml to reorder the desktop or keep an app off it; there is no list of apps in this code to edit"
+
+# What the included code needs INSTALLED. apt takes bare names: versions
+# are a function of the apt snapshot timestamp, so replaying names at the
+# adopter's timestamp yields versions consistent with the rest of their
+# environment. The other sources are not snapshot-pinned, so for them the
+# recorded version IS the pin (name = version).
+#
+# This template needs nothing installed beyond the stock workspace
+# environment. Both included apps are apps every mind already has: Python and
+# uv for the two backends, Node and npm for the two frontends (members of the
+# npm workspace rooted at system/package.json, with every dependency pinned in
+# the included system/package-lock.json), supervisorctl for the app Stop and
+# Start verbs, and mngr plus the harness CLIs the chat app drives as
+# subprocesses.
+[environment]
+apt = []
+env_d_units = []

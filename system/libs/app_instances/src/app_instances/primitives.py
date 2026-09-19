@@ -34,6 +34,12 @@ ABSOLUTE_HTTP_URL_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https"})
 
 MAX_INSTANCE_TITLE_LENGTH: Final[int] = 256
 
+# What the optional instance-search capability takes and answers (contracts.md section 4.4). The
+# query is bounded because it arrives on every keystroke, and the snippet because it is drawn on
+# one line of a result row.
+MAX_SEARCH_QUERY_LENGTH: Final[int] = 256
+MAX_MATCH_SNIPPET_LENGTH: Final[int] = 240
+
 # The one substitution a title template makes: the number of the allocated key.
 TITLE_NUMBER_PLACEHOLDER: Final[str] = "{n}"
 
@@ -210,6 +216,48 @@ class AbsoluteHttpUrl(str):
 # navigates to other sites' pages. Each app accepts the form that fits it and answers 400
 # for the other.
 LocationTarget: TypeAlias = LocationPath | AbsoluteHttpUrl
+
+
+class SearchQuery(str):
+    """What the user typed into the desktop's search: non-blank, trimmed, at most 256 characters."""
+
+    def __new__(cls, value: str) -> Self:
+        trimmed = value.strip()
+        if not trimmed:
+            raise InvalidInstanceValueError("invalid search query: must not be blank")
+        if len(trimmed) > MAX_SEARCH_QUERY_LENGTH:
+            raise InvalidInstanceValueError(
+                f"invalid search query: {len(trimmed)} characters is over the {MAX_SEARCH_QUERY_LENGTH}-character limit"
+            )
+        return super().__new__(cls, trimmed)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        return core_schema.no_info_after_validator_function(
+            cls, core_schema.str_schema()
+        )
+
+
+class MatchSnippet(str):
+    """The line of an instance's own content a search matched, trimmed for display."""
+
+    def __new__(cls, value: str) -> Self:
+        collapsed = " ".join(value.split())
+        if len(collapsed) > MAX_MATCH_SNIPPET_LENGTH:
+            raise InvalidInstanceValueError(
+                f"invalid snippet: {len(collapsed)} characters is over the {MAX_MATCH_SNIPPET_LENGTH}-character limit"
+            )
+        return super().__new__(cls, collapsed)
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        return core_schema.no_info_after_validator_function(
+            cls, core_schema.str_schema()
+        )
 
 
 class InstanceTitle(str):

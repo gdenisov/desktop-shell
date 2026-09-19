@@ -11,6 +11,7 @@ vi.mock("mithril", () => ({
 }));
 
 import { loadSnapshotWithStream } from "./StreamingMessage";
+import { addOutgoing, getOutgoingMessages } from "./OutgoingMessages";
 import { getConversationLoadState, getEventsForChat, type TranscriptEvent } from "./Response";
 
 interface Deferred<T> {
@@ -120,6 +121,32 @@ describe("snapshot retry after reconnect", () => {
 
       const ids = getEventsForChat(chatId).map((event) => event.event_id);
       expect(ids).toContain("missed");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stands a Sending bubble down for a turn that landed during the outage", async () => {
+    // The user's message went out just before the stream died, so its real turn arrived while
+    // no stream was listening: it is in the refetched snapshot and in no delta. Without this
+    // the bubble sat there saying "Sending…" under a reply the agent had already given.
+    vi.useFakeTimers();
+    try {
+      const chatId = `agent-${agentCounter++}`;
+      mockRequest.mockResolvedValueOnce({ events: [makeEvent("history", "an earlier turn")] });
+      await loadSnapshotWithStream(chatId);
+      addOutgoing(chatId, "sent as the stream died");
+      expect(getOutgoingMessages(chatId)).toHaveLength(1);
+
+      const deadSource = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+      deadSource?.onerror?.();
+      mockRequest.mockResolvedValueOnce({
+        events: [makeEvent("history", "an earlier turn"), makeEvent("landed", "sent as the stream died")],
+      });
+      await vi.advanceTimersByTimeAsync(6000);
+
+      expect(getEventsForChat(chatId).map((event) => event.event_id)).toContain("landed");
+      expect(getOutgoingMessages(chatId)).toHaveLength(0);
     } finally {
       vi.useRealTimers();
     }

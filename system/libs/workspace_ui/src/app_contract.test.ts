@@ -12,6 +12,7 @@ import {
   SHELL_HIDDEN,
   SHELL_LOCATION,
   SHELL_OPEN,
+  SHELL_TITLE,
   SHELL_SHOWN,
   connectToShell,
 } from "./app_contract";
@@ -84,7 +85,7 @@ describe("connectToShell", () => {
     expect(onHandshake).not.toHaveBeenCalled();
   });
 
-  it("posts focused, location, and open to the parent with the contract shapes", () => {
+  it("posts focused, location, open, and title to the parent with the contract shapes", () => {
     const parent = framed();
     connection = connectToShell({});
 
@@ -92,12 +93,14 @@ describe("connectToShell", () => {
     connection.location("/docs");
     connection.open("app:chat?instance=agent-2");
     connection.open("app:chat?instance=agent-3");
+    connection.title("agent-2", "groceries");
 
     expect(parent.postMessage.mock.calls).toEqual([
       [{ type: SHELL_FOCUSED }, "*"],
       [{ type: SHELL_LOCATION, path: "/docs" }, "*"],
       [{ type: SHELL_OPEN, address: "app:chat?instance=agent-2" }, "*"],
       [{ type: SHELL_OPEN, address: "app:chat?instance=agent-3" }, "*"],
+      [{ type: SHELL_TITLE, key: "agent-2", title: "groceries" }, "*"],
     ]);
   });
 

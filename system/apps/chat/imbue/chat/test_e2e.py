@@ -10,7 +10,6 @@ package's suite; what is tested here is the chat document.
 from __future__ import annotations
 
 import json
-import re
 import urllib.error
 import urllib.request
 from collections.abc import Generator
@@ -37,7 +36,6 @@ from imbue.chat.testing import RecordingMngrMessenger
 from imbue.chat.testing import RunningWorkspace
 from imbue.chat.testing import STARTER_PROJECT_ID
 from imbue.chat.testing import STARTER_PROJECT_NAME
-from imbue.chat.testing import STUB_APP_NAME
 from imbue.chat.testing import SummaryWritingMngrMessenger
 from imbue.chat.testing import is_e2e_browser_installed
 from imbue.chat.testing import running_workspace
@@ -96,8 +94,6 @@ def _chat_frame(page: Page, agent_id: str = FIXTURE_AGENT_ID) -> Frame:
 def _running_e2e_server(
     tmp_path: Path,
     session_events: list[dict[str, Any]] | None = None,
-    is_stub_app_offered: bool = False,
-    stub_instances: tuple[str, ...] = (),
     is_account_signed_in: bool = True,
 ) -> AbstractContextManager[RunningWorkspace]:
     """The two-server workspace, the shell and the chat each on a free port of their own."""
@@ -106,8 +102,6 @@ def _running_e2e_server(
         free_port(),
         free_port(),
         session_events=session_events,
-        is_stub_app_offered=is_stub_app_offered,
-        stub_instances=stub_instances,
         is_account_signed_in=is_account_signed_in,
     )
 
@@ -147,65 +141,45 @@ def _wait_for_layout_saved(state_dir: Path, view_id: str, containing: str | None
 
 
 def _wait_for_view(page: Page, view_id: str) -> None:
-    """The dock names the view it has mounted; the active view itself lives in the shell's client record."""
-    page.wait_for_selector(f'.dockview-workspace[data-view-id="{view_id}"]', state="attached", timeout=15000)
+    """The desktop names the view it has mounted; the active view itself lives in the shell's client record."""
+    page.wait_for_selector(f'#root[data-view-id="{view_id}"]', state="attached", timeout=15000)
+    expect(page.locator("#icons .icon").first).to_be_visible(timeout=15000)
 
 
-def _launcher_row(page: Page, address: str) -> Any:
-    return page.locator(f'.new-tab-launcher-row[data-address="{address}"]:visible')
+def _dock_tile(page: Page, address: str) -> Any:
+    return page.locator(f'#dock .dock-item[data-address="{address}"]')
 
 
-def _search_launcher(page: Page, query: str) -> None:
-    """Type into the New Tab page's search field, which swaps the page for the machine-wide results."""
-    page.locator(".new-tab-launcher:visible .new-tab-launcher-search input").fill(query)
+def _window(page: Page, address: str) -> Any:
+    return page.locator(f'.window[data-address="{address}"]')
 
 
-def _app_name_of_address(address: str) -> str:
-    return address.removeprefix("app:").split("?", 1)[0]
+def _open_from_dock(page: Page, address: str) -> None:
+    """Open a window on something already running, the way a user does: its tile in the dock.
 
-
-def _open_from_launcher(page: Page, address: str) -> None:
-    """Open an instance from the New Tab page (opening the page from the "+" when none is up).
-
-    A project's resting page lists only its own tab set, so an instance the project does not hold
-    is reached the way a user reaches it: by searching for its app.
+    The dock is what is RUNNING machine-wide rather than what this desktop shows, so a tile is
+    there for an instance the current view has never held -- which is how a chat listed under
+    Everything is reached from inside a project.
     """
-    expect(page.locator(".dv-default-tab-content").first).to_be_visible(timeout=15000)
-    launcher = page.locator(".new-tab-launcher:visible")
-    if launcher.count() == 0:
-        try:
-            expect(launcher.first).to_be_visible(timeout=3000)
-        except AssertionError:
-            page.locator(".dockview-add-tab-button:visible").first.click()
-    expect(page.locator(".new-tab-launcher")).to_be_visible(timeout=10000)
-    row = _launcher_row(page, address)
-    if row.count() == 0:
-        _search_launcher(page, _app_name_of_address(address))
-    expect(row.first).to_be_visible(timeout=15000)
-    row.first.click()
+    tile = _dock_tile(page, address)
+    expect(tile).to_be_visible(timeout=15000)
+    tile.click()
+    expect(_window(page, address)).to_be_visible(timeout=15000)
 
 
 def _start_new_chat(page: Page) -> FrameLocator:
-    """Run the chat app's ``new`` from the New Tab page's tile, and return the frame of the chat it docked."""
-    expect(page.locator(".dv-default-tab-content").first).to_be_visible(timeout=15000)
-    if page.locator(".new-tab-launcher:visible").count() == 0:
-        page.locator(".dockview-add-tab-button:visible").first.click()
-    tile = page.locator('.new-tab-launcher-tile[data-launch="chat:new"]:visible')
-    expect(tile.first).to_be_visible(timeout=15000)
-    tile.first.click()
+    """Click the desktop's Chat icon, which always starts a new one, and return the new window's frame."""
+    expect(page.locator("#icons .icon").first).to_be_visible(timeout=15000)
+    page.locator('#icons .icon[data-entry="chat"]').click()
     frame = page.frame_locator('iframe[data-address^="app:chat?instance="]')
     expect(page.locator('iframe[data-address^="app:chat?instance="]').first).to_be_attached(timeout=15000)
     return frame
 
 
 def _open_fixture_chat(page: Page) -> None:
-    """Open the fixture chat from the New Tab page and wait for its transcript."""
-    _open_from_launcher(page, FIXTURE_CHAT_ADDRESS)
+    """Open the fixture chat from its dock tile and wait for its transcript."""
+    _open_from_dock(page, FIXTURE_CHAT_ADDRESS)
     expect(_chat(page).locator(".message-list").first).to_be_visible(timeout=15000)
-
-
-def _tab(page: Page, title: str | re.Pattern[str]) -> Any:
-    return page.locator(".dv-default-tab-content", has_text=title).first
 
 
 def _broadcast_layout_op(base_url: str, op: str, args: dict[str, Any], view: str = STARTER_PROJECT_NAME) -> None:
@@ -239,31 +213,15 @@ def _broadcast_layout_op(base_url: str, op: str, args: dict[str, Any], view: str
     )
 
 
-def _stub_address(key: str) -> str:
-    return f"app:{STUB_APP_NAME}?instance={key}"
+def _switch_view(page: Page, base_url: str, view_name: str, view_id: str) -> None:
+    """Move the client to another view.
 
-
-def _open_rail_switcher(page: Page) -> None:
-    page.locator(".project-rail-header").click()
-    expect(page.locator(".project-rail-menu")).to_be_visible(timeout=5000)
-
-
-def _switch_view_via_rail(page: Page, view_name: str) -> None:
-    _open_rail_switcher(page)
-    page.locator(".project-rail-menu [role='menuitem']", has_text=view_name).first.click()
-
-
-# A page for a stub instance's frame, served by a Playwright route rather than by the stub
-# (which serves only its instances API).
-_FRAMED_PAGE_HTML = "<!doctype html><html><body><input id='held' value='' /></body></html>"
-
-
-def _serve_stub_pages(page: Page, server: RunningWorkspace) -> None:
-    assert server.stub_url is not None
-    page.route(
-        f"{server.stub_url}/**",
-        lambda route: route.fulfill(status=200, content_type="text/html", body=_FRAMED_PAGE_HTML),
-    )
+    The desktop has no view UI this pass (the projects API and its tab sets are untouched, but
+    nothing on screen switches between them), so the switch is driven the one way that exists:
+    an agent's ``load``, which is also what a chat does when it sends someone to a project.
+    """
+    _broadcast_layout_op(base_url, "load", {}, view=view_name)
+    _wait_for_view(page, view_id)
 
 
 # ---------- the chat page ----------
@@ -475,7 +433,7 @@ def test_chat_recovers_from_a_failed_transcript_load(tmp_path: Path, page: Page)
             lambda route: route.fulfill(status=503, content_type="text/plain", body="Backend not yet available"),
         )
         page.goto(server.shell_url)
-        _open_from_launcher(page, FIXTURE_CHAT_ADDRESS)
+        _open_from_dock(page, FIXTURE_CHAT_ADDRESS)
 
         error = _chat(page).locator(".message-list-error")
         expect(error).to_be_visible(timeout=15000)
@@ -531,19 +489,15 @@ def _min_message_index(messages: list[str]) -> int:
 
 
 @pytest.mark.timeout(120, func_only=False)
-def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
-    """Hiding a chat tab (and showing it again) must not move its loaded window.
+def test_a_minimized_window_preserves_its_chats_scroll_window(tmp_path: Path, page: Page) -> None:
+    """Putting a chat's window away (and bringing it back) must not move its loaded window.
 
-    An inactive tab stays mounted while hidden with ``display: none`` and its scroll element
-    reports every metric as 0, which the paging logic must not read as a jump to the very
-    start of the conversation.
+    A minimized window keeps its page loaded and merely stops showing it, with ``display: none``:
+    the page keeps running and its scroll element reports every metric as 0, which the paging
+    logic must not read as a jump to the very start of the conversation.
     """
     events = _make_long_conversation_events(150)
-    probe = _stub_address("stub-1")
-    with _running_e2e_server(
-        tmp_path, session_events=events, is_stub_app_offered=True, stub_instances=("stub-1",)
-    ) as server:
-        _serve_stub_pages(page, server)
+    with _running_e2e_server(tmp_path, session_events=events) as server:
         page.goto(server.shell_url)
         _wait_for_view(page, STARTER_PROJECT_ID)
         _open_fixture_chat(page)
@@ -551,25 +505,9 @@ def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
             "() => { const el = document.querySelector('.app-content'); return el && el.scrollHeight > el.clientHeight * 2; }",
             timeout=15000,
         )
-
-        # A sibling tab in the SAME group, so hiding the chat is a pure tab switch. The shell edits the
-        # client's saved arrangement, so the chat the browser just opened has to be saved first.
+        # The shell edits the client's saved arrangement, so the window the browser just opened
+        # has to be saved before an op can name it.
         _wait_for_layout_saved(server.state_dir, STARTER_PROJECT_ID, containing=FIXTURE_CHAT_ADDRESS)
-        _broadcast_layout_op(server.shell_url, "open", {"address": probe, "new_group": True})
-        expect(_tab(page, "Stub 1")).to_be_visible(timeout=_TRIGGER_TIMEOUT_MS)
-        _broadcast_layout_op(
-            server.shell_url,
-            "move",
-            {"address": probe, "relative_to": FIXTURE_CHAT_ADDRESS, "direction": "within"},
-        )
-        page.wait_for_function(
-            "() => document.querySelectorAll('.dv-groupview').length === 1", timeout=_TRIGGER_TIMEOUT_MS
-        )
-        _broadcast_layout_op(server.shell_url, "focus", {"address": FIXTURE_CHAT_ADDRESS})
-        _chat_frame(page).wait_for_function(
-            "() => { const el = document.querySelector('.app-content'); return el && el.clientHeight > 0; }",
-            timeout=_TRIGGER_TIMEOUT_MS,
-        )
         page.wait_for_timeout(1000)
 
         _chat_frame(page).evaluate(
@@ -583,7 +521,8 @@ def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
         anchor_message = before_hidden[0]
         assert _min_message_index(before_hidden) >= 50, f"setup should be reading mid-history: {before_hidden[:3]}"
 
-        _broadcast_layout_op(server.shell_url, "focus", {"address": probe})
+        # The window's own minimize button: the page stays loaded, and nothing is showing it.
+        _window(page, FIXTURE_CHAT_ADDRESS).locator('.win-btn[data-action="minimize"]').click()
         _chat_frame(page).wait_for_function(
             "() => { const el = document.querySelector('.app-content'); return el && el.clientHeight === 0; }",
             timeout=_TRIGGER_TIMEOUT_MS,
@@ -605,11 +544,14 @@ def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
 
         during_hidden = _visible_user_messages(page)
         assert anchor_message in during_hidden, (
-            f"hidden tab lost its place: anchor {anchor_message!r} no longer rendered ({during_hidden[:3]}...)"
+            f"a minimized window lost its place: anchor {anchor_message!r} no longer rendered ({during_hidden[:3]}...)"
         )
-        assert "msg-0" not in during_hidden, f"hidden tab jumped to the start of the conversation: {during_hidden[:3]}"
+        assert "msg-0" not in during_hidden, (
+            f"a minimized window jumped to the start of the conversation: {during_hidden[:3]}"
+        )
 
-        _broadcast_layout_op(server.shell_url, "focus", {"address": FIXTURE_CHAT_ADDRESS})
+        # The dock tile brings it back, which is the gesture that undoes a minimize.
+        _dock_tile(page, FIXTURE_CHAT_ADDRESS).click()
         _chat_frame(page).wait_for_function(
             "() => { const el = document.querySelector('.app-content'); return el && el.clientHeight > 0; }",
             timeout=_TRIGGER_TIMEOUT_MS,
@@ -618,13 +560,13 @@ def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
         after_restore = _visible_user_messages(page)
         scroll_top_after = _chat_frame(page).evaluate("() => document.querySelector('.app-content').scrollTop")
         assert "msg-0" not in after_restore, (
-            f"after showing the tab again the window jumped to the start: {after_restore[:3]}"
+            f"after the window came back it jumped to the start: {after_restore[:3]}"
         )
         assert anchor_message in after_restore, (
-            f"after showing the tab again the reader was not returned to their place: {after_restore[:3]}"
+            f"after the window came back the reader was not returned to their place: {after_restore[:3]}"
         )
         assert abs(scroll_top_after - scroll_top_before) < 50, (
-            f"scroll position drifted across hide/show: {scroll_top_before} -> {scroll_top_after}"
+            f"scroll position drifted across minimize/restore: {scroll_top_before} -> {scroll_top_after}"
         )
 
 
@@ -633,11 +575,11 @@ def test_hidden_tab_preserves_scroll_window(tmp_path: Path, page: Page) -> None:
 
 @pytest.mark.timeout(120, func_only=False)
 def test_switching_views_preserves_chat_transcript(tmp_path: Path, page: Page) -> None:
-    """A chat pane restored by a view switch still shows its own transcript.
+    """A chat window restored by a view switch still shows its own transcript.
 
-    Everything lists the machine's agent whatever project shows it, so opening it there
-    leaves it open in the starter project too. Switching back restores the starter
-    project's layout, whose panel must bind to the same instance.
+    Each view has its own desktop, and the chat's page is one page machine-wide: opening the
+    chat under Everything and then coming back to the project rebuilds the project's desktop,
+    whose window must bind to that same page rather than to an empty one.
     """
     with _running_e2e_server(tmp_path) as server:
         page.on("dialog", lambda dialog: dialog.accept())
@@ -647,15 +589,15 @@ def test_switching_views_preserves_chat_transcript(tmp_path: Path, page: Page) -
         expect(_chat(page).locator(".message-user", has_text="Hello agent!").first).to_be_visible(timeout=15000)
         _wait_for_layout_saved(server.state_dir, STARTER_PROJECT_ID, containing=FIXTURE_CHAT_ADDRESS)
 
-        _switch_view_via_rail(page, EVERYTHING_VIEW_NAME)
-        _wait_for_view(page, EVERYTHING_VIEW_ID)
-        expect(page.locator(".new-tab-launcher")).to_be_visible(timeout=15000)
-        _open_from_launcher(page, FIXTURE_CHAT_ADDRESS)
+        _switch_view(page, server.shell_url, EVERYTHING_VIEW_NAME, EVERYTHING_VIEW_ID)
+        # A desktop nobody has arranged in this view holds no windows, so the chat is opened again.
+        expect(_window(page, FIXTURE_CHAT_ADDRESS)).to_have_count(0)
+        _open_from_dock(page, FIXTURE_CHAT_ADDRESS)
         expect(_chat(page).locator(".message-user", has_text="Hello agent!").first).to_be_visible(timeout=15000)
         _wait_for_layout_saved(server.state_dir, EVERYTHING_VIEW_ID, containing=FIXTURE_CHAT_ADDRESS)
 
-        _switch_view_via_rail(page, STARTER_PROJECT_NAME)
-        _wait_for_view(page, STARTER_PROJECT_ID)
+        _switch_view(page, server.shell_url, STARTER_PROJECT_NAME, STARTER_PROJECT_ID)
+        expect(_window(page, FIXTURE_CHAT_ADDRESS)).to_be_visible(timeout=15000)
         expect(_chat(page).locator(".message-user", has_text="Hello agent!").first).to_be_visible(timeout=15000)
         expect(_chat(page).locator(".message-list-empty")).to_have_count(0)
         expect(_chat(page).locator(".message-list-not-found")).to_have_count(0)

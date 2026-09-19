@@ -29,6 +29,9 @@ export const SHELL_FOCUSED = "shell:focused";
 export const SHELL_LOCATION = "shell:location";
 /** App to shell: dock an instance of this app beside this tab. */
 export const SHELL_OPEN = "shell:open";
+/** App to shell: the name an instance of this app is about to have (a rename the app has accepted
+ *  but not finished); the shell titles that instance's windows with it at once. */
+export const SHELL_TITLE = "shell:title";
 
 export interface ShellHandshake {
   clientId: string;
@@ -54,6 +57,8 @@ export interface ShellConnection {
   location(path: string): void;
   /** Ask the shell to dock an instance of this app beside this tab. */
   open(address: string): void;
+  /** Tell the shell the name an instance of this app is about to have, so its windows say so now. */
+  title(key: string, title: string): void;
   /** Stop listening to the shell. */
   disconnect(): void;
 }
@@ -109,6 +114,7 @@ export function connectToShell(handlers: ShellConnectionHandlers): ShellConnecti
     focused: () => send(SHELL_FOCUSED, {}),
     location: (path: string) => send(SHELL_LOCATION, { path }),
     open: (address: string) => send(SHELL_OPEN, { address }),
+    title: (key: string, title: string) => send(SHELL_TITLE, { key, title }),
     disconnect: () => boundWindow.removeEventListener("message", onMessage),
   };
 }

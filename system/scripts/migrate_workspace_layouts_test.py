@@ -13,12 +13,12 @@ import pytest
 from app_instances.data_types import InstanceLifetime
 from conftest import migrate_workspace_layouts as migrate
 from files_app.main import build_files_source
-from imbue.system_interface.shell.data_types import instance_panel_params_by_id
-from imbue.system_interface.shell.dockview_document import (
+from imbue.system_interface.shell.data_types import windows_of
+from imbue.system_interface.shell.desktop_document import (
     Direction,
-    Placement,
-    add_panel,
-    panel_id_for_address,
+    add_window,
+    split_beside,
+    window_for_address,
 )
 from imbue.system_interface.shell.layouts import LayoutStore
 from imbue.system_interface.shell.primitives import Address, DeviceKind, mint_tab_id
@@ -348,66 +348,43 @@ def test_run_writes_seeds_the_shell_reads_and_the_editor_can_edit(
     assert code == 0
     store = LayoutStore(state_directory=state_dir)
     seed = store.read_layout("project-1", "never-seen-client", DeviceKind.DESKTOP)
-    assert seed.dockview is not None
+    # The migration writes the grid the shell of its day understood; the shell reads it back as
+    # the desktop that grid becomes, one window per docked tab.
+    assert seed.desktop is not None
     assert seed.updated_at is not None and seed.updated_at.isoformat() == _NOW
-    params_by_panel_id = instance_panel_params_by_id(seed.dockview)
-    assert {params.address for params in params_by_panel_id.values()} == {
+    assert {window.address for window in windows_of(seed)} == {
         _CHAT_AAA,
         _TERMINAL_1,
         _BROWSER_1,
         _FILES_2,
         _DOCS,
     }
-    # Panel ids are fresh tab ids, used consistently in the grid and the panel entries, whose
-    # params carry the frontend's current shape; the file carries no ``tabs`` block.
+    # Every window carries a page id of the minted shape, and the migrated file itself carries
+    # no ``tabs`` block.
     assert "tabs" not in json.loads(
         (state_dir / "layouts" / "project-1" / "seed.desktop.json").read_text()
     )
-    for panel_id, params in params_by_panel_id.items():
-        assert _TAB_ID.fullmatch(panel_id) and params.tab_id == panel_id
-        entry = seed.dockview["panels"][panel_id]
-        assert entry["contentComponent"] == "instance"
-        assert entry["tabComponent"] == "custom"
-        assert entry["params"] == {
-            "kind": "instance",
-            "address": str(params.address),
-            "tabId": panel_id,
-            "lastFocusedMs": params.last_focused_ms,
-        }
-    groups = seed.dockview["grid"]["root"]["data"]
-    assert [len(group["data"]["views"]) for group in groups] == [2, 3]
-    assert all(
-        _TAB_ID.fullmatch(view) for group in groups for view in group["data"]["views"]
-    )
-    assert seed.dockview["activeGroup"] == "g1"
-    # Titles and recency carried over: the custom title wins, the last-used stamp lands on the tab.
-    files_panel = panel_id_for_address(seed, Address(_FILES_2))
-    assert files_panel is not None
-    assert seed.dockview["panels"][files_panel]["title"] == "My notes"
-    chat_panel = panel_id_for_address(seed, Address(_CHAT_AAA))
-    assert (
-        chat_panel is not None
-        and params_by_panel_id[chat_panel].last_focused_ms == 1700000000000
-    )
-    assert params_by_panel_id[files_panel].last_focused_ms == 1700000001000
-    # The seed is a document the shell's editor accepts: a split beside the chat lands in a new group.
-    edited = add_panel(
-        seed,
+    assert all(_TAB_ID.fullmatch(str(window.tab_id)) for window in windows_of(seed))
+    # Recency carried over, and it decides what comes back on top.
+    assert windows_of(seed)[-1].address == _FILES_2
+    assert window_for_address(seed.desktop, Address(_CHAT_AAA)) is not None
+
+    # The seed is a document the shell's editor accepts: a split beside the chat tiles the two.
+    chat_window = window_for_address(seed.desktop, Address(_CHAT_AAA))
+    assert chat_window is not None
+    edited = split_beside(
+        seed.desktop,
+        chat_window.tab_id,
         Address("app:notes?instance=notes-1"),
         mint_tab_id(),
-        "Notes 1",
-        Placement(
-            anchor_panel_id=chat_panel,
-            direction=Direction.BELOW,
-            ratio=0.5,
-            is_new_group=True,
-            group_id="split-group",
-        ),
+        Direction.BELOW,
+        0.5,
     )
-    assert edited.dockview is not None
-    assert (
-        panel_id_for_address(edited, Address("app:notes?instance=notes-1")) is not None
-    )
+    assert window_for_address(edited, Address("app:notes?instance=notes-1")) is not None
+    # And an ordinary open lands on top of it.
+    opened = add_window(edited, Address("app:notes?instance=notes-2"), mint_tab_id(), None)
+    assert opened.windows[-1].address == Address("app:notes?instance=notes-2")
+
     # The mobile seed and the other project's seed exist; the empty and corrupt ones do not.
     assert (state_dir / "layouts" / "project-1" / "seed.mobile.json").exists()
     assert (state_dir / "layouts" / "research" / "seed.desktop.json").exists()
@@ -415,10 +392,7 @@ def test_run_writes_seeds_the_shell_reads_and_the_editor_can_edit(
     assert not (state_dir / "layouts" / "everything").exists()
     # A client of the other device kind starts from its own seed, not the desktop's.
     mobile = store.read_layout("project-1", "never-seen-client", DeviceKind.MOBILE)
-    assert [
-        str(params.address)
-        for params in instance_panel_params_by_id(mobile.dockview).values()
-    ] == [_CHAT_AAA]
+    assert [str(window.address) for window in windows_of(mobile)] == [_CHAT_AAA]
 
 
 def test_run_writes_projects_the_shell_reads(

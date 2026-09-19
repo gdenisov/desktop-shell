@@ -8,7 +8,7 @@
 
 import { apiUrl } from "@imbue/workspace-ui/src/base-path";
 import { ReconnectBackoff } from "@imbue/workspace-ui/src/models/backoff";
-import { appendEvents, fetchEvents, type TranscriptEvent } from "./Response";
+import { appendEvents, fetchEvents, noteLoadedArrivals, type TranscriptEvent } from "./Response";
 import { parseJsonMessage } from "@imbue/workspace-ui/src/models/ws-json";
 
 const activeStreams = new Map<string, EventSource>();
@@ -151,6 +151,9 @@ async function reconnectWithSnapshot(chatId: string): Promise<void> {
   try {
     await loadSnapshotWithStream(chatId);
     console.info(`[si-sse] snapshot loaded for chat ${chatId}`);
+    // A turn the user sent that landed during the outage is in this snapshot and in no delta,
+    // so the snapshot is what stands its "Sending…" bubble down.
+    noteLoadedArrivals(chatId);
   } catch (error) {
     // Until the snapshot lands, the stream (if it connected) is appending
     // deltas onto the pre-outage window, so events emitted during the outage

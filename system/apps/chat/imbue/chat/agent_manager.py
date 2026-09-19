@@ -178,6 +178,11 @@ _DEFAULT_MESSENGER: Final[MngrMessenger] = MngrMessenger()
 # rate, which costs ~3x under gVisor.
 _SESSION_SWEEP_INTERVAL_SECONDS: Final[float] = 10.0
 
+# How long a destroyed agent's tombstone outlives its destroy when no authoritative listing has
+# omitted it yet: well past the observe stream's snapshot cadence, short enough that a tombstone
+# the stream never confirmed cannot hide anything for long.
+DESTROYED_TOMBSTONE_SECONDS: Final[float] = 300.0
+
 # How long one ``mngr rename`` / ``mngr label`` may take. Both edit the
 # provider's persisted agent data (rename also moves the tmux session on a live
 # host), so they are short local operations -- but they run inside a request the
@@ -650,6 +655,7 @@ def chat_snapshot_for_active_agent(
     chat: _ResolvedChat,
     is_permission_pending: bool,
     shoulder_tap_available: bool,
+    last_messaged_at: float | None = None,
 ) -> ChatSnapshot:
     """The snapshot of a chat from the agent it runs on.
 
@@ -659,6 +665,10 @@ def chat_snapshot_for_active_agent(
     canonical form is the mngr ``name`` the chat is still addressed by in mngr's own terms.
     While the chat converges, the name pair comes from its handoff entry: the agent standing
     in may already carry its archival name.
+
+    ``last_messaged_at`` is the message-stamps store's entry for the chat (None when it has
+    never been messaged), which the pages sort the list on; it rides the snapshot rather than
+    a second push because the two change together (a send bumps both).
     """
     handoff = chat.handoff
     transition = chat.transition
@@ -684,6 +694,7 @@ def chat_snapshot_for_active_agent(
             queued_messages=agent.queued_messages,
             shoulder_tap_available=shoulder_tap_available,
         ),
+        last_messaged_at=last_messaged_at,
     )
 
 
@@ -771,6 +782,13 @@ class AgentManager:
     # seconds after its create returns) until the stream reports one or omits it from enough
     # snapshots to say it never existed.
     _created_unobserved_by_id: dict[str, _CreatedAgentAwaitingObserve]
+    # Agents this server destroyed, by id, with when (``time.monotonic``). The observe stream and a
+    # rediscovery can still list a destroyed agent for a few seconds after its destroy returned
+    # (a snapshot taken before it, delivered after), which would put the chat back in every list
+    # until the next snapshot; a rebuild drops these instead. A tombstone goes once an
+    # authoritative listing (a full snapshot, a rediscovery) omits the agent, or after
+    # ``DESTROYED_TOMBSTONE_SECONDS`` regardless.
+    _destroyed_agent_ids: dict[str, float]
     # The session sweep's lifecycle: ``_session_sweep_stop`` ends the loop.
     _session_sweep_stop: threading.Event
     _session_sweep_thread: threading.Thread | None
@@ -916,6 +934,7 @@ class AgentManager:
         manager._agent_details_by_id = {}
         manager._agents = {}
         manager._created_unobserved_by_id = {}
+        manager._destroyed_agent_ids = {}
         manager._match_by_agent_id = {}
         manager._chat_record_store = chat_record_store if chat_record_store is not None else InMemoryChatRecordStore()
         manager._chat_record_by_id = manager._chat_record_store.read_all()
@@ -1186,9 +1205,14 @@ class AgentManager:
             pending_by_agent = {
                 agent.id: bool(self._pending_permission_ids_by_agent.get(agent.id)) for agent, _chat in listed
             }
+        last_messaged = self._message_stamps.read()
         return [
             chat_snapshot_for_active_agent(
-                agent, chat, pending_by_agent[agent.id], self._shoulder_tap_available(agent)
+                agent,
+                chat,
+                pending_by_agent[agent.id],
+                self._shoulder_tap_available(agent),
+                last_messaged.get(chat.chat_id),
             )
             for agent, chat in listed
         ]
@@ -1204,7 +1228,13 @@ class AgentManager:
             is_pending = agent is not None and bool(self._pending_permission_ids_by_agent.get(agent.id))
         if chat is None or agent is None or is_primary_agent(agent):
             return None
-        return chat_snapshot_for_active_agent(agent, chat, is_pending, self._shoulder_tap_available(agent))
+        return chat_snapshot_for_active_agent(
+            agent,
+            chat,
+            is_pending,
+            self._shoulder_tap_available(agent),
+            self._message_stamps.read().get(chat.chat_id),
+        )
 
     def get_active_agent_info(self, chat_id: ChatId) -> AgentInfo | None:
         """The agent a chat currently runs on (with its resolved dirs), or None for an id that names no chat."""
@@ -2343,6 +2373,8 @@ class AgentManager:
         """
         with self._lock:
             self._agents.pop(agent_id, None)
+            self._agent_details_by_id.pop(agent_id, None)
+            self._destroyed_agent_ids[agent_id] = time.monotonic()
             self._created_unobserved_by_id.pop(agent_id, None)
             self._match_by_agent_id.pop(agent_id, None)
             self._pending_permission_ids_by_agent.pop(agent_id, None)
@@ -3140,6 +3172,7 @@ class AgentManager:
                 )
 
             with self._lock:
+                self._drop_destroyed_locked(new_agents, is_authoritative=True)
                 old_ids = set(self._agents.keys())
                 new_ids = set(new_agents.keys())
                 self._agents = new_agents
@@ -3271,6 +3304,20 @@ class AgentManager:
             return
         self._handle_observe_event(event)
 
+    def _drop_destroyed_locked(self, listed: dict[str, Any], is_authoritative: bool) -> None:
+        """Take the agents this server destroyed out of ``listed`` (a listing that may predate the
+        destroy), and let a tombstone go once an authoritative listing omits its agent or it has
+        aged out. Must be called with the lock held."""
+        now = time.monotonic()
+        for agent_id, destroyed_at in list(self._destroyed_agent_ids.items()):
+            if agent_id in listed:
+                if now - destroyed_at <= DESTROYED_TOMBSTONE_SECONDS:
+                    del listed[agent_id]
+                    continue
+                del self._destroyed_agent_ids[agent_id]
+            elif is_authoritative or now - destroyed_at > DESTROYED_TOMBSTONE_SECONDS:
+                del self._destroyed_agent_ids[agent_id]
+
     def _handle_observe_event(self, event: AgentStateEvent | FullAgentStateEvent | AgentRemovedEvent) -> None:
         """Fold one observe agents-stream event into the tracked agent view.
 
@@ -3294,6 +3341,8 @@ class AgentManager:
                     self._agent_details_by_id[str(event.agent.id)] = event.agent
                 case AgentRemovedEvent():
                     self._agent_details_by_id.pop(str(event.agent_id), None)
+            # A snapshot taken before a destroy this server ran must not bring the agent back.
+            self._drop_destroyed_locked(self._agent_details_by_id, is_authoritative=is_full_snapshot)
             details_by_id = dict(self._agent_details_by_id)
 
         before_ids = set(before_details)

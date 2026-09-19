@@ -38,6 +38,10 @@ class InstanceConflictError(AppInstancesError):
     """The app cannot do this now: a create it refuses, or a title another instance already has (answered 409)."""
 
 
+class SearchNotSupportedError(AppInstancesError):
+    """The app does not search inside its instances (answered 400)."""
+
+
 class NotReadyError(AppInstancesError):
     """The app is still initialising and has no answer yet (answered 503)."""
 

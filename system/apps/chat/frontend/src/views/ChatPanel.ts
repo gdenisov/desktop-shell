@@ -430,6 +430,7 @@ export function ChatPanel(): m.Component<{ chatId: string; isVisible?: boolean }
    *  seeded chat that has no agent yet (the stream follows the chat's active agent, and its seed
    *  never changes; the reload once the first agent lands brings the stream). */
   async function loadChat(chatId: string, isStreamed = true): Promise<void> {
+    const isReturnVisit = loadedChatIds.has(chatId);
     try {
       if (isStreamed) {
         // Buffer SSE deltas arriving during the snapshot fetch so the wholesale
@@ -438,6 +439,12 @@ export function ChatPanel(): m.Component<{ chatId: string; isVisible?: boolean }
       } else {
         await fetchEvents(chatId);
       }
+      loadedChatIds.add(chatId);
+      // Coming back to a chat this page left: whatever the user sent that landed while the
+      // page had no stream on it is in the placed snapshot, not in any delta, so the snapshot
+      // is what stands those "Sending…" bubbles down. Not on a first load, where every turn in
+      // the window is history and a bubble typed during the load must wait for its own turn.
+      if (isReturnVisit) noteLoadedArrivals(chatId);
     } catch (error) {
       // Where the load got to is recorded against the agent by `fetchEvents` and
       // read back in the view, so that a later attempt -- from any caller,
@@ -450,6 +457,9 @@ export function ChatPanel(): m.Component<{ chatId: string; isVisible?: boolean }
       console.warn(`Failed to load the transcript for chat ${chatId}`, error);
     }
   }
+
+  // The chats this page has placed a transcript for: a load of one of these is a return visit.
+  const loadedChatIds = new Set<string>();
 
   // A user-initiated reload is outstanding; guards against stacking them.
   let reloadInFlight = false;
@@ -487,6 +497,12 @@ export function ChatPanel(): m.Component<{ chatId: string; isVisible?: boolean }
       return;
     }
 
+    // A page that swaps chats in place (a pick from the chat list) keeps one stream, as a
+    // one-chat page always did: the chat being left disconnects, and reconnects fresh if the
+    // user comes back to it.
+    if (currentChatId !== null) {
+      disconnectFromStream(currentChatId);
+    }
     currentChatId = chatId;
     // Resets all scroll state and loads this chat's persisted position (which
     // then steers the engine's fill toward it once the snapshot lands).

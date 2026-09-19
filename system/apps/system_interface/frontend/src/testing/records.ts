@@ -24,6 +24,7 @@ export function appRecord(name: string, overrides: Partial<AppRecord> = {}): App
     critical: false,
     instances_url: "",
     has_instances: true,
+    browses_instances: false,
     actions: [{ id: "new", label: `New ${name}`, params: [] }],
     default_shortcut: null,
     launcher_rank: null,

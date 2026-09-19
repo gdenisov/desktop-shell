@@ -11,6 +11,7 @@ from app_instances.primitives import (
     InstanceTitle,
     InstanceUrl,
     LocationTarget,
+    MatchSnippet,
 )
 
 
@@ -56,6 +57,12 @@ class InstanceRecord(FrozenModel):
         default=False,
         description="Whether the stop and start routes are accepted for this instance",
     )
+    # Defaulted too: most apps have nothing to say beyond the fields above. An app that does
+    # (which agent started a chat, say) passes it along here for the shell's own views.
+    labels: dict[str, str] = Field(
+        default_factory=dict,
+        description="Free-form string facts about the instance, for the shell's views",
+    )
 
     @field_validator("last_active")
     @classmethod
@@ -63,6 +70,15 @@ class InstanceRecord(FrozenModel):
         if value is None:
             return None
         return value.astimezone(timezone.utc)
+
+
+class InstanceMatch(FrozenModel):
+    """One instance whose own content a search matched, with the line that matched (contracts.md section 4.4)."""
+
+    key: InstanceKey = Field(description="The instance the match is in")
+    snippet: MatchSnippet = Field(
+        description="What the match looks like in context, for the result row's second line"
+    )
 
 
 class CreateRequest(FrozenModel):

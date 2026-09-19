@@ -380,3 +380,11 @@ system/scripts/notify_user.local.sh
 # the app or its tests)
 system/apps/system_interface/frontend/permission-demo.html
 system/apps/system_interface/frontend/src/permission-demo.ts
+
+# Machine state written by a shell or an app that was RUN from its own package
+# directory rather than from the repo root -- a throwaway instance on an
+# alternate port, a type check, a test run. The real state lives in the
+# workspace's own data/ (contracts.md section 17); these are strays, and they
+# must never be committed.
+system/apps/*/data/
+system/libs/*/data/

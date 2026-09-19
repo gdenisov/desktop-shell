@@ -42,6 +42,8 @@ export interface InstanceRecord {
   renameable: boolean;
   /** Whether the app stops and starts this instance on its own (a chat's agent, a browser's Chromium, a terminal's session). */
   stoppable: boolean;
+  /** The app's free-form string facts about it (a chat's ``agent_created`` and ``lead_agent``); absent from an older shell. */
+  labels?: Record<string, string>;
 }
 
 export interface AppAction {
@@ -72,6 +74,15 @@ export interface AppRecord {
   critical: boolean;
   instances_url: string;
   has_instances: boolean;
+  /**
+   * Whether the app lists its own instances inside its window.
+   *
+   * The desktop then leaves them to it: the dock carries one tile per WINDOW open on the app
+   * rather than one per instance it is running, because an app with thirteen chats would
+   * otherwise crowd everything else out of the dock, and its own list is a better place to
+   * choose between them from.
+   */
+  browses_instances: boolean;
   actions: AppAction[];
   default_shortcut: DefaultShortcut | null;
   /** The app's place among the New Tab page's leading tiles, lowest first; null puts it after every ranked app. */

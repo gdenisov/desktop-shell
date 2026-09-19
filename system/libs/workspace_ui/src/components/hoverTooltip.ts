@@ -1,21 +1,20 @@
 /**
  * The workspace's tooltip: a single bubble on ``document.body`` rather than
- * next to its target, positioned (fixed) under the target after a hover-intent
- * delay.
+ * next to its target, positioned (fixed) under the target the moment it is
+ * hovered.
  *
- * Tab content in dockview can use neither of the usual tooltip mechanisms.
- * Native ``title`` is suppressed: dockview marks every tab ``draggable``
- * (tab.js sets ``element.draggable = true``, plus
- * ``-webkit-user-drag: element``), and Chromium hides ``title`` tooltips on
- * draggable elements and their descendants. A CSS ``::after`` bubble is
- * clipped by the tab strip's overflow (``.dv-tabs-container`` is
- * ``overflow: auto`` and ``.dv-groupview`` is ``overflow: hidden``). A
- * body-level, fixed-position element driven by our own listeners avoids both:
- * it is not a native tooltip, and it is not inside the clipping container.
+ * Neither of the usual tooltip mechanisms survives the surfaces this workspace
+ * puts tooltips on. Native ``title`` is suppressed on anything the user drags:
+ * Chromium hides it on ``draggable`` elements and their descendants, which is
+ * every desktop icon and every dock tile. A CSS ``::after`` bubble is clipped
+ * by whatever scrolls or hides its overflow around it -- the dock's own strip,
+ * a window's body. A body-level, fixed-position element driven by our own
+ * listeners avoids both: it is not a native tooltip, and it is not inside the
+ * clipping container.
  *
  * That being the only mechanism that works everywhere in the workspace, it is
- * the one every workspace tooltip uses: 250ms hover-intent delay, keyboard
- * focus too, no fade, centered under the trigger with a 6px gap, flipped above
+ * the one every workspace tooltip uses: no delay and no fade, keyboard focus
+ * too, centered under the trigger with a 6px gap, flipped above
  * on bottom overflow, clamped to the viewport, dropped when its own trigger is
  * left or blurred and on any click / scroll / resize. The centered-below
  * placement is the default everywhere and callers should not opt out of it
@@ -32,18 +31,25 @@
  * leaves the document takes the bubble with it. A trigger must be IN the
  * document to be heard -- a detached tree never reaches the listeners.
  *
- * The one deliberate exception is the project rail: a rail row sits directly
- * above the row it is being compared against (e.g. the shortcut a hover is
- * about to reveal versus the one below it), so a centered-below bubble covers
- * exactly the row the tooltip is meant to help someone choose. ``placeTooltip``
- * takes an optional ``placement`` for that one case, defaulting to the shared
- * centered-below behavior everywhere else.
+ * ``placeTooltip`` takes an optional ``placement`` for the one case
+ * centered-below cannot serve: a vertical list whose rows are being compared
+ * against each other, where a bubble under one row covers exactly the row the
+ * tooltip is meant to help someone choose. The chat app's collapsed chat list
+ * is that case -- a strip of monograms whose titles are read from beside them --
+ * and every other caller gets the default.
  */
 
 import type m from "mithril";
 
-/** Hover-intent delay before a tooltip appears. */
-const TOOLTIP_DELAY_MS = 250;
+/**
+ * Delay before a tooltip appears, in milliseconds.
+ *
+ * None: a tooltip is the whole of the feedback on the surfaces that use it most -- the dock's
+ * tiles neither lift nor light up under the pointer -- so a quarter-second of nothing reads as
+ * the workspace not responding. The cost is that sweeping the pointer across a row of tiles puts
+ * up a tooltip per tile on the way past, which is the trade the immediacy was asked for over.
+ */
+const TOOLTIP_DELAY_MS = 0;
 /** Gap between the trigger and the bubble. */
 const TOOLTIP_GAP = 6;
 /** Minimum gap from the window edges. */

@@ -423,29 +423,36 @@ a tab stuck on the loading page, broken WebSockets), see
 ## Step 4: Surface the view to the user
 
 Once verification passes, tell the workspace UI to actually open the
-new tab. Without this step the user would have to discover it via the
-"+" dropdown -- skip the surfacing step only for services with no UI
+new app. Without this step the user would have to discover it via the
+"+" menu -- skip the surfacing step only for services with no UI
 (pure JSON APIs, webhook receivers, etc.).
 
 ```bash
 python3 system/scripts/layout.py open <name>
 ```
 
+The new app opens in a window **beside your own chat's window**, the two
+splitting the desktop, so the user can read the app and the conversation that
+produced it at once. Pass `--direction left|above|below` or `--ratio` if the
+app wants the other side or more room (a wide dashboard, say). With no window
+of your own on that desktop there is nothing to sit beside, and the window is
+cascaded at the default size instead.
+
 With no `--view`, the op edits the view the target client is looking
-at, which is where the user expects the new tab. (Pass `--view <name>`
+at, which is where the user expects the new app. (Pass `--view <name>`
 -- a project's name, or `Everything` -- to surface it in a different
 view instead; the op edits that view's arrangement and switches the
 client to it.)
 `layout.py` POSTs to a loopback-only shell endpoint that applies the op
 to that client's saved layout (no browser needs to be connected) and
-broadcasts `layout_updated`, so every window of the client docks the
-new tab beside the requesting chat, or brings the tab for `<name>` to
-the front when it is already open.
+broadcasts `layout_updated`, so every window of the client picks up the
+new arrangement -- or raises the window for `<name>` when it is already
+open, instead of opening a second one.
 The script briefly waits for the service to appear in
 `data/.state/apps.toml` so it's safe to run immediately after the
 `forward_port.py` call.
 
-To force a reload of an already-open tab (e.g. after redeploying the
+To force a reload of an already-open app (e.g. after redeploying the
 service) without prompting the user to click Refresh:
 
 ```bash

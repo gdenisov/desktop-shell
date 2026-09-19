@@ -13,21 +13,22 @@ from app_manifest.registry import RegistryAction
 from app_manifest.registry import RegistryRow
 from loguru import logger
 from pydantic import AwareDatetime
-from pydantic import ConfigDict
 from pydantic import Field
-from pydantic import ValidationError
 from pydantic import model_validator
 
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.primitives import NonEmptyStr
 from imbue.imbue_common.pure import pure
+from imbue.system_interface.shell.desktop_document import DesktopDocument
+from imbue.system_interface.shell.desktop_document import DesktopWindow
+from imbue.system_interface.shell.desktop_document import EMPTY_DESKTOP
+from imbue.system_interface.shell.desktop_document import desktop_from_dockview_document
 from imbue.system_interface.shell.primitives import Address
 from imbue.system_interface.shell.primitives import ClientActivityKind
 from imbue.system_interface.shell.primitives import ClientId
 from imbue.system_interface.shell.primitives import DeviceKind
 from imbue.system_interface.shell.primitives import ProjectId
 from imbue.system_interface.shell.primitives import SaveId
-from imbue.system_interface.shell.primitives import TabId
 from imbue.system_interface.shell.primitives import ViewId
 from imbue.system_interface.shell.primitives import address_for
 
@@ -51,86 +52,20 @@ class Project(FrozenModel):
     shortcuts: tuple[Shortcut, ...] = Field(description="The rail rows, in rail order")
 
 
-# The ``kind`` the ``params`` of a dockview panel showing an instance carry (contracts.md section 6). A
-# launcher panel (the New Tab page) carries another kind and names no instance, so the shell never looks for it.
+# CLEANUP: drop everything under this heading -- the two folds and the ``_as_desktop_layout`` validators on
+# ``LayoutRecord`` and ``LayoutSaveRequest`` that call them, plus the tests of the older shapes -- once every
+# workspace has saved a desktop layout. Two older shapes exist: a file from before the workspace app model
+# carried a ``tabs`` block beside the dockview document, which was the truth of each panel's identity, and a
+# file from before the desktop shell carried the dockview grid itself.
+
+# The ``kind`` the ``params`` of a dockview panel showing an instance carried. A launcher panel (the New Tab
+# page) carried another kind and named no instance.
 INSTANCE_PANEL_KIND: Final[str] = "instance"
 
 
-class InstancePanelParams(FrozenModel):
-    """The ``params`` dockview stores on a panel showing an instance: the one place a tab's identity lives (contracts.md section 6)."""
-
-    # The browser owns this object and may add keys the shell does not know; reading tolerates them, and
-    # the shell edits the stored dict itself (``with_panel_params_address``, which keeps every other key)
-    # rather than round-tripping it through this model.
-    model_config = ConfigDict(extra="ignore")
-
-    address: Address = Field(description="The instance the panel shows")
-    tab_id: TabId = Field(
-        alias="tabId",
-        description="The page's id: minted when the page was first opened, shared by every panel showing it",
-    )
-    last_focused_ms: int = Field(
-        default=0,
-        alias="lastFocusedMs",
-        description="Epoch milliseconds the panel was last the active one, 0 when never",
-    )
-
-
-@pure
-def _panel_entries(dockview: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    panels = dockview.get("panels") if dockview is not None else None
-    if not isinstance(panels, dict):
-        return {}
-    return {panel_id: entry for panel_id, entry in panels.items() if isinstance(entry, dict)}
-
-
-def instance_panel_params_by_id(dockview: dict[str, Any] | None) -> dict[str, InstancePanelParams]:
-    """Each instance panel's params, keyed by dockview panel id. Launchers are skipped; an instance panel whose params
-    do not parse is skipped with a warning, so a damaged entry costs one tab rather than the whole arrangement."""
-    parsed: dict[str, InstancePanelParams] = {}
-    for panel_id, entry in _panel_entries(dockview).items():
-        params = entry.get("params")
-        if not isinstance(params, dict) or params.get("kind") != INSTANCE_PANEL_KIND:
-            continue
-        try:
-            parsed[panel_id] = InstancePanelParams.model_validate(params)
-        except ValidationError as e:
-            logger.warning("Skipped panel {} with unreadable params: {}", panel_id, e.errors()[0]["msg"])
-    return parsed
-
-
-@pure
-def instance_panel_params_json(address: Address, tab_id: TabId, last_focused_ms: int) -> dict[str, Any]:
-    """The ``params`` entry the shell writes for an instance panel, in the browser's spelling."""
-    return {
-        "kind": INSTANCE_PANEL_KIND,
-        "address": str(address),
-        "tabId": str(tab_id),
-        "lastFocusedMs": last_focused_ms,
-    }
-
-
-@pure
-def with_panel_params_address(dockview: dict[str, Any], panel_id: str, address: Address) -> dict[str, Any]:
-    """The document with the params of ``panel_id`` pointed at ``address``, every other key of the params kept."""
-    panels = dockview["panels"]
-    entry = panels[panel_id]
-    return {
-        **dockview,
-        "panels": {**panels, panel_id: {**entry, "params": {**entry["params"], "address": str(address)}}},
-    }
-
-
-# CLEANUP: drop this fold, the ``_fold_legacy_tabs`` validators on ``LayoutRecord`` and ``LayoutSaveRequest`` that
-# call it, the ``tabs`` mention in the docstrings that cite it, and the two tests of the older shape
-# (``test_a_layout_in_the_older_shape_reads_as_params_only`` in data_types_test.py and
-# ``test_a_save_in_the_older_shape_is_folded_into_the_panels_params`` in routes_test.py) once every workspace has
-# saved a layout with a shell from after the workspace app model's params-only layout files: a file written by
-# the older shell carried a ``tabs`` block beside the dockview document, and that block was the truth of each
-# panel's identity.
 @pure
 def fold_legacy_tabs_into_dockview(data: Any) -> Any:
-    """A layout body in the older shape, with its ``tabs`` block folded into each panel's ``params``; any other value unchanged."""
+    """A layout body in the oldest shape, with its ``tabs`` block folded into each panel's ``params``; any other value unchanged."""
     if not isinstance(data, dict) or "tabs" not in data:
         return data
     without_tabs = {key: value for key, value in data.items() if key != "tabs"}
@@ -155,10 +90,37 @@ def fold_legacy_tabs_into_dockview(data: Any) -> Any:
     return {**without_tabs, "dockview": {**dockview, "panels": panels}}
 
 
-class LayoutRecord(FrozenModel):
-    """One client's arrangement of one view (contracts.md section 6): dockview's own document, whose per-panel ``params`` name what each tab shows."""
+def fold_dockview_into_desktop(data: Any) -> Any:
+    """A layout body that still carries a dockview grid, as the desktop that grid becomes (contracts.md section 6).
 
-    dockview: dict[str, Any] | None = Field(description="The serialized dockview grid, None for a never-arranged view")
+    Each docked tab becomes a cascaded window; the grid itself is dropped, so the arrangement is
+    rewritten in the new shape the next time the client saves.
+    """
+    if not isinstance(data, dict) or "dockview" not in data:
+        return data
+    without_dockview = {key: value for key, value in data.items() if key != "dockview"}
+    dockview = data["dockview"]
+    if without_dockview.get("desktop") is not None:
+        return without_dockview
+    # A file that was saved with no arrangement at all carries a desktop that has never been
+    # arranged either, rather than no key for one.
+    if not isinstance(dockview, dict):
+        return {**without_dockview, "desktop": None}
+    migrated = desktop_from_dockview_document(dockview)
+    logger.info("Read a saved dockview arrangement as a desktop of {} window(s)", len(migrated.windows))
+    return {**without_dockview, "desktop": migrated.model_dump(mode="json")}
+
+
+@pure
+def as_desktop_layout_body(data: Any) -> Any:
+    """A layout body in any shape this shell has ever written, as one carrying a desktop document."""
+    return fold_dockview_into_desktop(fold_legacy_tabs_into_dockview(data))
+
+
+class LayoutRecord(FrozenModel):
+    """One client's desktop for one view (contracts.md section 6): its windows, its icons, and its dock."""
+
+    desktop: DesktopDocument | None = Field(description="The client's desktop, None for a view it has never arranged")
     device_kind: DeviceKind = Field(description="The device kind the arrangement was made on")
     updated_at: AwareDatetime | None = Field(
         description="When the arrangement was last saved, None for the empty layout"
@@ -166,8 +128,20 @@ class LayoutRecord(FrozenModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _fold_legacy_tabs(cls, data: Any) -> Any:
-        return fold_legacy_tabs_into_dockview(data)
+    def _as_desktop_layout(cls, data: Any) -> Any:
+        return as_desktop_layout_body(data)
+
+
+@pure
+def windows_of(layout: LayoutRecord) -> tuple[DesktopWindow, ...]:
+    """Every window the layout holds, bottom of the stack first; empty for a view never arranged."""
+    return () if layout.desktop is None else layout.desktop.windows
+
+
+@pure
+def desktop_of(layout: LayoutRecord) -> DesktopDocument:
+    """The layout's desktop, or the empty one: an edit of a never-arranged view starts from a bare desktop."""
+    return layout.desktop if layout.desktop is not None else EMPTY_DESKTOP
 
 
 class ClientRecord(FrozenModel):
@@ -190,6 +164,7 @@ class InventoryInstance(FrozenModel):
     last_active: AwareDatetime | None = Field(description="When it was last active, None when unknown")
     renameable: bool = Field(description="Whether the rename route is accepted")
     stoppable: bool = Field(description="Whether the stop and start routes are accepted")
+    labels: dict[str, str] = Field(default_factory=dict, description="The app's free-form string facts about it")
 
     @pure
     def address(self, app: AppName) -> Address:
@@ -207,6 +182,7 @@ def inventory_instance_from_record(record: InstanceRecord) -> InventoryInstance:
         last_active=record.last_active,
         renameable=record.renameable,
         stoppable=record.stoppable,
+        labels=dict(record.labels),
     )
 
 
@@ -267,6 +243,10 @@ def app_wire_json(entry: AppInventoryEntry) -> dict[str, Any]:
         "critical": row.critical,
         "instances_url": instances_url_of(row),
         "has_instances": row.instances,
+        # The app lists its own instances inside its window, so the desktop leaves them to it:
+        # the dock carries the app's windows rather than one tile per instance (contracts.md
+        # section 6), and the instances are reached from inside the app and from search.
+        "browses_instances": row.browses_instances,
         "actions": [action_wire_json(action) for action in effective_actions(row)],
         "default_shortcut": default_shortcut_wire_json(row.default_shortcut),
         "launcher_rank": row.launcher_rank,
@@ -346,12 +326,12 @@ class LayoutSaveRequest(FrozenModel):
         description="The updated_at of the arrangement the window last fetched or saved; None for one it only saw empty",
     )
     device_kind: DeviceKind = Field(description="The device kind the arrangement was made on")
-    dockview: dict[str, Any] | None = Field(description="The serialized dockview grid, its panels' params included")
+    desktop: DesktopDocument | None = Field(description="The desktop as the window has it now")
 
     @model_validator(mode="before")
     @classmethod
-    def _fold_legacy_tabs(cls, data: Any) -> Any:
-        return fold_legacy_tabs_into_dockview(data)
+    def _as_desktop_layout(cls, data: Any) -> Any:
+        return as_desktop_layout_body(data)
 
 
 class ClientReportOutcome(FrozenModel):

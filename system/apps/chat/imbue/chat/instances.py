@@ -15,9 +15,13 @@ import threading
 from collections.abc import Callable
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
+from datetime import datetime
+from datetime import timezone
+from pathlib import Path
 from typing import Final
 
 from app_instances.data_types import InstanceLifetime
+from app_instances.data_types import InstanceMatch
 from app_instances.data_types import InstanceRecord
 from app_instances.data_types import InstanceStatus
 from app_instances.errors import InvalidParamsError
@@ -34,6 +38,7 @@ from app_instances.primitives import InstanceTitle
 from app_instances.primitives import InstanceUrl
 from app_instances.primitives import LocationTarget
 from app_instances.primitives import MAX_INSTANCE_TITLE_LENGTH
+from app_instances.primitives import SearchQuery
 from app_manifest.primitives import ActionId
 from app_manifest.primitives import AppName
 from pydantic import Field
@@ -41,6 +46,7 @@ from pydantic import PrivateAttr
 
 from imbue.chat.accounts import AccountError
 from imbue.chat.activity_state import is_lifecycle_dead
+from imbue.chat.agent_discovery import get_host_dir
 from imbue.chat.agent_manager import AgentManager
 from imbue.chat.chat_handoffs import converging_detail
 from imbue.chat.errors import ChatCreateRefusedError
@@ -62,6 +68,9 @@ from imbue.chat.models import ProvisionalChat
 from imbue.chat.models import ProvisionalChatPhase
 from imbue.chat.primitives import AGENT_ID_PATTERN
 from imbue.chat.primitives import ChatId
+from imbue.chat.transcript_search import TRANSCRIPT_SCAN_BYTES
+from imbue.chat.transcript_search import TranscriptCache
+from imbue.chat.transcript_search import search_transcripts
 from imbue.imbue_common.frozen_model import FrozenModel
 from imbue.imbue_common.model_update import to_update
 from imbue.imbue_common.pure import pure
@@ -86,6 +95,14 @@ _SUBAGENT_PARAMS: Final[frozenset[str]] = frozenset({PARENT_PARAM, SESSION_PARAM
 # the instance-key alphabet has a dot and the id alphabet does not.
 SUBAGENT_KEY_SEPARATOR: Final[str] = "."
 
+# How many chats one search looks inside. The list is in the app's own order, most recently
+# listed first, so the cap falls on the chats the user is least likely to be reaching for.
+MAX_SEARCHED_CHATS: Final[int] = 60
+
+# How much transcript one search may read across every chat it looks at. The search runs again on
+# every keystroke, so the whole answer is bounded rather than each chat alone.
+MAX_SEARCH_BYTES: Final[int] = 64 * 1024 * 1024
+
 PROVISIONAL_TITLE: Final[str] = "New chat"
 SUBAGENT_TITLE_PREFIX: Final[str] = "Subagent: "
 # A subagent's description is free text from the transcript; the record keeps as much of it
@@ -108,13 +125,24 @@ def instance_url_for_key(key: str) -> InstanceUrl:
 
 @pure
 def instance_record_for_chat(snapshot: ChatSnapshot) -> InstanceRecord:
+    # When the chat was last messaged is when it was last active, as far as the desktop is
+    # concerned: it is what puts a chat among the "recent" rows of the desktop's menu.
+    last_active = (
+        None
+        if snapshot.last_messaged_at is None
+        else datetime.fromtimestamp(snapshot.last_messaged_at, tz=timezone.utc)
+    )
     return InstanceRecord(
         key=InstanceKey(snapshot.chat_id),
+        # The desktop's chat list reads who started the chat (``agent_created`` / ``lead_agent``),
+        # and files it under the chat that owns the agent the lead label names: a chat that moved
+        # to a new agent keeps its old ones, so every agent id of the chat rides along.
+        labels={**snapshot.labels, "agent_ids": ",".join(snapshot.agent_ids)},
         url=instance_url_for_key(snapshot.chat_id),
         title=InstanceTitle(snapshot.title),
         status=snapshot.status,
         lifetime=InstanceLifetime.EXPLICIT,
-        last_active=None,
+        last_active=last_active,
         renameable=True,
         stoppable=True,
     )
@@ -144,6 +172,7 @@ def instance_record_for_provisional_chat(provisional: ProvisionalChat) -> Instan
     """A chat that is not an agent yet: waiting for an account, being created, or failed."""
     return InstanceRecord(
         key=InstanceKey(provisional.chat_id),
+        labels={"user_created": "true"},
         url=instance_url_for_key(provisional.chat_id),
         title=InstanceTitle(provisional.name or PROVISIONAL_TITLE),
         status=_STATUS_BY_PROVISIONAL_PHASE[provisional.phase],
@@ -224,6 +253,16 @@ class AgentManagerInstanceSource(InstanceSourceInterface):
     agent_starter: Callable[[str], None] = Field(
         frozen=True, description="Ensures the named agent is running; raises MngrError when it cannot"
     )
+    transcript_host_dir: Path = Field(
+        default_factory=get_host_dir,
+        frozen=True,
+        description="Where the agents' transcripts are, which the instance search reads",
+    )
+    # What the search has already read: the box asks again on every keystroke, and a transcript
+    # that has not changed between two of them is scanned from memory rather than read again.
+    _transcript_cache: TranscriptCache = PrivateAttr(
+        default_factory=lambda: TranscriptCache(max_bytes=MAX_SEARCH_BYTES)
+    )
     # The subagent views the parent pages asked for, by key. In memory: a restart forgets
     # them, and the parent's page recreates one on demand. A record whose chat is gone is
     # dropped the next time the list is read.
@@ -246,6 +285,32 @@ class AgentManagerInstanceSource(InstanceSourceInterface):
             subagents = list(self._description_by_subagent_key.items())
         records.extend(instance_record_for_subagent(key, description) for key, description in subagents)
         return records
+
+    def search_instances(self, query: SearchQuery, max_match_count: int) -> list[InstanceMatch]:
+        """The chats whose conversation holds ``query``, most recently listed first.
+
+        The shell has already matched every chat's title itself, so this answers the other half:
+        what was actually said. Bounded twice over -- a fixed number of chats are looked at, and
+        each stops being read the moment it matches -- because the desktop's search box asks again
+        on every keystroke.
+        """
+        self._require_ready()
+        matches: list[InstanceMatch] = []
+        remaining_bytes = MAX_SEARCH_BYTES
+        for snapshot in self.manager.get_chat_snapshots()[:MAX_SEARCHED_CHATS]:
+            if len(matches) >= max_match_count or remaining_bytes <= 0:
+                break
+            outcome = search_transcripts(
+                self.transcript_host_dir,
+                snapshot.agent_ids,
+                query,
+                min(TRANSCRIPT_SCAN_BYTES, remaining_bytes),
+                self._transcript_cache,
+            )
+            remaining_bytes -= outcome.bytes_read
+            if outcome.snippet is not None:
+                matches.append(InstanceMatch(key=InstanceKey(snapshot.chat_id), snippet=outcome.snippet))
+        return matches
 
     def create_instance(self, action: ActionId, params: Mapping[str, str]) -> InstanceRecord:
         self._require_ready()

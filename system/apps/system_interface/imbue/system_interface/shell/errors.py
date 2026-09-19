@@ -54,8 +54,8 @@ class InstanceNotListedError(ShellError, LookupError):
     """No app lists an instance at the given address."""
 
 
-class PanelNotFoundError(ShellError, LookupError):
-    """The client's arrangement of the view holds no panel for the address."""
+class WindowNotFoundError(ShellError, LookupError):
+    """The client's desktop for the view holds no window for the address."""
 
 
 class LayoutOpError(ShellError, ValueError):

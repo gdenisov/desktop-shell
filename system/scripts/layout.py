@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
-"""Agent-facing helper for inspecting and mutating the workspace layout, over addresses.
+"""Agent-facing helper for inspecting and mutating the workspace desktop, over addresses.
 
 Subcommands:
     list                                List every app with its instances (address, title, status, where docked).
-    inspect                             Describe the live dock (compact by default; --verbose for the YAML tree).
-    where <address>                     Show one panel: its group's tab-mates and the addresses in each direction.
+    inspect                             Describe the desktop: every window, where it sits, and its state.
+    where <address>                     Show one window: where it sits, and what lies in each direction.
     context                             Show each browser client's recent messages, device kind, and active view.
     views                               List the views (projects + Everything): tab sets and the clients on each.
     load <view>                         Switch the target client onto a view.
-    open <address|url>                  Dock an instance next to the caller's chat (focus it when it is already open),
-                                        create one (--action / --param), or open a URL in a new browser.
-    focus <address>                     Activate the named panel within its group.
-    split <address> [...]               Add a panel relative to another panel; tabs into an adjacent group by default.
-    close <address>                     Remove the named panel.
-    move <address> --relative-to <address> [...]  Relocate a panel; iframe DOM is preserved.
+    open <address|url>                  Open a window beside your own chat's (raise it when it already has
+                                        one), create one (--action / --param), or open a URL in a browser.
+    focus <address>                     Raise a window to the front (and out of the dock).
+    split <address> [...]               Tile a new window against another: each takes half the desktop.
+    close <address>                     Put a window away (minimize); what it shows keeps running.
+    move <address> --relative-to <address> [...]  Snap an open window beside another; its page is not reloaded.
     rename <address> <title>            Retitle an instance through its app (the title shows in every view).
     delete <address>                    Delete an instance through its app (it leaves every view).
     stop <address>                      Stop what backs an instance (a chat's agent, a browser's Chromium, a
                                         terminal's session) through its app; the instance stays, as ``stopped``.
     start <address>                     Bring a stopped instance back through its app.
     replace-url <address> <path-or-url> Point an instance at a path under its app, or at a URL for an app that browses.
-    maximize <address>                  Maximize the panel's group within the dock.
-    restore                             Exit a maximized group.
+    maximize <address>                  Fill the desktop with one window.
+    restore                             Put a maximized window back where it was.
     refresh <address>                   Reload one iframe; a bare app address reloads every iframe of that app.
     shortcuts                           List a view's rail shortcuts (app, action, mode).
     shortcut set <app> <action> [...]   Add a rail shortcut to a project, or change its mode.
@@ -33,7 +33,7 @@ Every instance is named by one *address* (contracts.md section 1):
   (``app:chat?instance=agent-...``, the id of its first agent), a terminal by its tmux
   session name
   (``app:terminal?instance=terminal-3``), a browser by its name.
-- ``app:<name>`` -- a single-instance app's one tab (an app built without instances, say
+- ``app:<name>`` -- a single-instance app's one window (an app built without instances, say
   ``app:docs``), or, as an ``open`` / ``split`` target, "a fresh instance of this app" for an
   app that has instances (``open app:terminal``, ``open app:files``).
 
@@ -44,8 +44,8 @@ machine.
 
 The workspace shows one *view* at a time: a project, or ``Everything`` (the unfiltered
 home). Every browser *client* (one per browser, shared by its windows) has one active view and
-its own arrangement of every view, kept in a file on the shell that is the truth of the
-arrangement. Every op targets exactly one client: ``--client <id>`` (from ``context``), else
+its own desktop for every view -- the windows it holds and where each one sits -- kept in a
+file on the shell that is the truth of the arrangement. Every op targets exactly one client: ``--client <id>`` (from ``context``), else
 the client that most recently messaged you, else the one connected client; with several
 clients and no way to tell, the op is refused and lists them. The shell edits that client's
 file itself, so an op lands whether or not a browser is connected, and a connected window
@@ -53,13 +53,26 @@ shows it within a redraw. An op edits the client's active view; ``--view <name>`
 project's name, or ``Everything``) edits that view's arrangement and switches the client to
 it. ``context`` tells you which client (and view, and device kind) recently messaged each chat.
 
-``--direction`` on ``split`` / ``move`` accepts five values: ``left`` / ``right`` /
-``above`` / ``below`` target the *adjacent* group in that direction (tabbing into one that
-already lives there unless ``--new-group`` is passed), and ``within`` tabs the panel into
-the anchor's *own* group.
+``open``, ``split`` and ``move`` tile: ``--direction left`` / ``right`` / ``above`` /
+``below`` resizes the anchor to one side of the desktop and puts the placed window on the
+other, so both are visible at once (``--ratio`` decides how much of the desktop the placed one
+takes; half by default). ``within`` has no side to take: it gives the placed window the
+anchor's own rectangle, directly above it in the stack. ``move`` never reloads the window it
+moves, so a chat or a terminal keeps its state.
+
+``open`` and ``split`` differ in how hard they insist on an anchor. ``open`` tiles against
+your own chat's window by default -- an app opened for the user sits beside the conversation
+that asked for it -- but that is a preference: with no window of your own on that desktop it
+cascades the new window instead, since an open must always open. ``split`` was asked for a
+tiling against a named window, so a missing anchor is the op's error rather than a quiet
+fallback.
+
+``--new-group`` is accepted and ignored -- a desktop has no tab groups. ``close`` is the
+desktop's minimize (the window goes, the instance keeps running); ``stop`` is the verb for
+ending what a window shows.
 
 The document ops (``open`` / ``split`` / ``move`` / ``focus`` / ``close``) answer with the
-arrangement as the shell wrote it, so on success they print a concise description on stderr
+desktop as the shell wrote it, so on success they print a concise description on stderr
 at once; ``open`` of an app (or a URL) creates the instance through the app inside the op and
 prints the new address to stdout, and an app's refusal is the op's error. ``maximize`` /
 ``restore`` / ``refresh`` change what is on screen without changing the saved arrangement,
@@ -444,7 +457,7 @@ def _emit_structured(data: Any, as_json: bool) -> None:
         sys.stdout.write(json.dumps(data, indent=2))
         sys.stdout.write("\n")
     else:
-        # ``sort_keys=False`` keeps the server's intentional ordering (panels in tab order).
+        # ``sort_keys=False`` keeps the server's intentional ordering (windows in stacking order).
         yaml.safe_dump(data, sys.stdout, sort_keys=False, default_flow_style=False)
 
 
@@ -476,67 +489,71 @@ def _fetch_layout(
     return layout
 
 
-def _walk_tree_leaves(node: Any) -> list[dict[str, Any]]:
-    """Every leaf node of the inspect tree, depth-first."""
-    if not isinstance(node, dict):
+def _windows(layout: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every window the desktop holds, bottom of the stack first."""
+    windows = layout.get("windows")
+    if not isinstance(windows, list):
         return []
-    if node.get("type") == "leaf":
-        return [node]
-    if node.get("type") == "branch":
-        leaves: list[dict[str, Any]] = []
-        for child in node.get("children", []) or []:
-            leaves.extend(_walk_tree_leaves(child))
-        return leaves
-    return []
+    return [window for window in windows if isinstance(window, dict)]
 
 
-def _address_matches(requested: str, panel_address: Any) -> bool:
-    """Whether a live panel's address satisfies the requested one.
+def _address_matches(requested: str, window_address: Any) -> bool:
+    """Whether a live window's address satisfies the requested one.
 
     Exact match, plus one widening: a bare ``app:<name>`` is satisfied by any instance of
-    that app (``app:<name>?instance=...``), the way the frontend resolves it.
+    that app (``app:<name>?instance=...``), the way the shell resolves it.
     """
-    if not isinstance(panel_address, str):
+    if not isinstance(window_address, str):
         return False
-    if panel_address == requested:
+    if window_address == requested:
         return True
     if "?" in requested:
         return False
-    return panel_address.startswith(f"{requested}?{ADDRESS_INSTANCE_PARAMETER}")
+    return window_address.startswith(f"{requested}?{ADDRESS_INSTANCE_PARAMETER}")
 
 
-def _find_leaf_for_address(
-    layout: dict[str, Any], address: str
-) -> dict[str, Any] | None:
-    for leaf in _walk_tree_leaves(layout.get("tree")):
-        for panel in leaf.get("panels", []) or []:
-            if _address_matches(address, panel.get("address")):
-                return leaf
+def _find_window(layout: dict[str, Any], address: str) -> dict[str, Any] | None:
+    for window in _windows(layout):
+        if _address_matches(address, window.get("address")):
+            return window
     return None
 
 
-def _find_panel_summary(layout: dict[str, Any], address: str) -> dict[str, Any] | None:
-    for panel in layout.get("panels", []) or []:
-        if _address_matches(address, panel.get("address")):
-            return panel
-    return None
+def _window_rect(window: dict[str, Any]) -> dict[str, int]:
+    rect = window.get("rect")
+    if not isinstance(rect, dict):
+        return {"x": 0, "y": 0, "width": 0, "height": 0}
+    return {key: int(rect.get(key, 0) or 0) for key in ("x", "y", "width", "height")}
 
 
-def _addresses_in_group(leaf: dict[str, Any]) -> list[str]:
-    """Tab-mate addresses in order, with the active tab marked by a trailing ``*``."""
-    out: list[str] = []
-    for panel in leaf.get("panels", []) or []:
-        address = panel.get("address")
-        if not isinstance(address, str):
-            continue
-        out.append(f"{address}*" if panel.get("active") else address)
-    return out
+def _window_state_words(window: dict[str, Any]) -> list[str]:
+    """What is worth saying about a window beside where it is."""
+    words: list[str] = []
+    if window.get("is_minimized"):
+        words.append("minimized")
+    if window.get("is_maximized"):
+        words.append("maximized")
+    if window.get("is_on_top"):
+        words.append("on top")
+    return words
 
 
-def _describe_group(leaf: dict[str, Any] | None) -> str:
-    if leaf is None:
-        return "<absent>"
-    return "tabs=[" + ", ".join(_addresses_in_group(leaf)) + "]"
+def _describe_window(window: dict[str, Any]) -> str:
+    """One window on one line: what it shows, what it is called, and where it sits."""
+    rect = _window_rect(window)
+    title = window.get("title")
+    named = f'  "{title}"' if isinstance(title, str) and title else ""
+    words = _window_state_words(window)
+    trailing = "  (" + ", ".join(words) + ")" if words else ""
+    return f"{window.get('address')}{named}  {rect['width']}x{rect['height']} at ({rect['x']},{rect['y']}){trailing}"
+
+
+def _describe_desktop(layout: dict[str, Any]) -> str:
+    """The windows an op left on screen, for its one-line summary."""
+    windows = _windows(layout)
+    if not windows:
+        return "an empty desktop"
+    return "windows=[" + ", ".join(str(window.get("address")) for window in windows) + "]"
 
 
 # ---------- The runners: document ops answer with the arrangement, transient ops confirm the send ----------
@@ -579,24 +596,6 @@ def _run_transient_op(op: str, args: dict[str, Any]) -> int:
 # ---------- Compact rendering for inspect / where ----------
 
 
-def _format_tree_compact(node: Any, indent: int = 0) -> list[str]:
-    pad = "  " * indent
-    if not isinstance(node, dict):
-        return []
-    if node.get("type") == "leaf":
-        size = node.get("size_ratio")
-        size_str = f" size={size}" if size is not None else ""
-        return [f"{pad}[{' '.join(_addresses_in_group(node))}]{size_str}"]
-    if node.get("type") == "branch":
-        size = node.get("size_ratio")
-        size_str = f" size={size}" if size is not None else ""
-        out = [f"{pad}{node.get('arrangement', '?')}{size_str}"]
-        for child in node.get("children", []) or []:
-            out.extend(_format_tree_compact(child, indent + 1))
-        return out
-    return []
-
-
 def _emit_layout_view(layout: dict[str, Any], *, as_json: bool, verbose: bool) -> None:
     if as_json:
         sys.stdout.write(json.dumps(layout, indent=2))
@@ -605,64 +604,56 @@ def _emit_layout_view(layout: dict[str, Any], *, as_json: bool, verbose: bool) -
     if verbose:
         yaml.safe_dump(layout, sys.stdout, sort_keys=False, default_flow_style=False)
         return
-    active = layout.get("active_panel")
-    if active is not None:
-        sys.stdout.write(f"active_panel: {active}\n")
-    tree = layout.get("tree")
-    if tree is None:
-        sys.stdout.write("(no layout)\n")
+    windows = _windows(layout)
+    if not windows:
+        sys.stdout.write("(nothing open)\n")
         return
-    for line in _format_tree_compact(tree):
-        sys.stdout.write(line + "\n")
+    size = layout.get("desktop_size")
+    if isinstance(size, dict):
+        sys.stdout.write(f"desktop {size.get('width')}x{size.get('height')}\n")
+    for window in windows:
+        sys.stdout.write(f"  {_describe_window(window)}\n")
 
 
-# ---------- where: neighbor lookup by tree structure ----------
+# ---------- where: what sits around one window ----------
+
+# How much of the other axis two windows must share before one counts as being beside the
+# other: a window that merely clips a corner is not what "to the left of" means.
+_OVERLAP_FRACTION = 0.25
 
 
-def _build_leaf_parents(
-    node: Any, parent_chain: tuple[dict[str, Any], ...]
-) -> dict[int, tuple[dict[str, Any], ...]]:
-    out: dict[int, tuple[dict[str, Any], ...]] = {}
-    if not isinstance(node, dict):
-        return out
-    if node.get("type") == "leaf":
-        out[id(node)] = parent_chain
-        return out
-    if node.get("type") == "branch":
-        extended = (*parent_chain, node)
-        for child in node.get("children", []) or []:
-            out.update(_build_leaf_parents(child, extended))
-    return out
+def _is_beside(rect: dict[str, int], other: dict[str, int], direction: str) -> bool:
+    """Whether ``other`` lies in ``direction`` from ``rect``, overlapping it on the other axis."""
+    if direction in ("left", "right"):
+        shared = min(rect["y"] + rect["height"], other["y"] + other["height"]) - max(rect["y"], other["y"])
+        if shared < _OVERLAP_FRACTION * min(rect["height"] or 1, other["height"] or 1):
+            return False
+        if direction == "left":
+            return other["x"] + other["width"] <= rect["x"] + rect["width"] // 2
+        return other["x"] >= rect["x"] + rect["width"] // 2
+    shared = min(rect["x"] + rect["width"], other["x"] + other["width"]) - max(rect["x"], other["x"])
+    if shared < _OVERLAP_FRACTION * min(rect["width"] or 1, other["width"] or 1):
+        return False
+    if direction == "above":
+        return other["y"] + other["height"] <= rect["y"] + rect["height"] // 2
+    return other["y"] >= rect["y"] + rect["height"] // 2
 
 
-def _neighbors_in_direction(
-    layout: dict[str, Any], leaf: dict[str, Any], direction: str
-) -> list[dict[str, Any]]:
-    """Leaves adjacent to ``leaf`` in ``direction``: the nearest ancestor of the matching arrangement decides."""
-    tree = layout.get("tree")
-    if tree is None:
-        return []
-    chain = _build_leaf_parents(tree, ()).get(id(leaf), ())
-    if not chain:
-        return []
-    target_arrangement = "row" if direction in ("left", "right") else "column"
-    side = "before" if direction in ("left", "above") else "after"
-    current: dict[str, Any] = leaf
-    for ancestor in reversed(chain):
-        if ancestor.get("arrangement") != target_arrangement:
-            current = ancestor
+def _neighbors_in_direction(layout: dict[str, Any], window: dict[str, Any], direction: str) -> list[str]:
+    """The windows lying in ``direction`` from this one, nearest first, minimized ones aside."""
+    rect = _window_rect(window)
+    beside: list[tuple[int, str]] = []
+    for other in _windows(layout):
+        if other is window or other.get("is_minimized"):
             continue
-        children = ancestor.get("children", []) or []
-        try:
-            idx = next(i for i, c in enumerate(children) if c is current)
-        except StopIteration:
-            return []
-        if side == "before" and idx > 0:
-            return _walk_tree_leaves(children[idx - 1])
-        if side == "after" and idx < len(children) - 1:
-            return _walk_tree_leaves(children[idx + 1])
-        current = ancestor
-    return []
+        other_rect = _window_rect(other)
+        if not _is_beside(rect, other_rect, direction):
+            continue
+        distance = abs(other_rect["x"] - rect["x"]) if direction in ("left", "right") else abs(other_rect["y"] - rect["y"])
+        address = other.get("address")
+        if isinstance(address, str):
+            beside.append((distance, address))
+    return [address for _distance, address in sorted(beside)]
 
 
 # ---------- The inventory (list, views, Everything's rail) ----------
@@ -862,27 +853,20 @@ def _cmd_where(args: argparse.Namespace) -> int:
         return EXIT_ERROR
     layout = _fetch_layout(args.view, args.client)
     if layout is None:
-        sys.stderr.write("error: inspect failed; could not locate the panel\n")
+        sys.stderr.write("error: inspect failed; could not locate the window\n")
         return EXIT_ERROR
-    leaf = _find_leaf_for_address(layout, address)
-    if leaf is None:
-        sys.stderr.write(f"error: {address!r} is not currently open\n")
+    window = _find_window(layout, address)
+    if window is None:
+        sys.stderr.write(f"error: {address!r} has no window on this desktop\n")
         return EXIT_ERROR
-    panel_summary = _find_panel_summary(layout, address) or {}
     view: dict[str, Any] = {
-        "address": panel_summary.get("address", address),
-        "title": panel_summary.get("title"),
-        "tab_id": panel_summary.get("tab_id"),
-        "group": {
-            "size_ratio": leaf.get("size_ratio"),
-            "tabs": _addresses_in_group(leaf),
-        },
+        "address": window.get("address", address),
+        "title": window.get("title"),
+        "tab_id": window.get("tab_id"),
+        "rect": _window_rect(window),
+        "state": _window_state_words(window),
         "neighbors": {
-            direction: [
-                tab
-                for neighbor in _neighbors_in_direction(layout, leaf, direction)
-                for tab in _addresses_in_group(neighbor)
-            ]
+            direction: _neighbors_in_direction(layout, window, direction)
             for direction in _CARDINAL_DIRECTIONS
         },
     }
@@ -895,15 +879,10 @@ def _cmd_where(args: argparse.Namespace) -> int:
     if args.verbose:
         yaml.safe_dump(view, sys.stdout, sort_keys=False, default_flow_style=False)
         return EXIT_OK
-    sys.stdout.write(f"address: {view['address']}\n")
-    if panel_summary.get("title"):
-        sys.stdout.write(f"title:   {panel_summary['title']}\n")
-    sys.stdout.write(f"group:   [{' '.join(view['group']['tabs'])}]\n")
+    sys.stdout.write(f"{_describe_window(window)}\n")
     for direction in _CARDINAL_DIRECTIONS:
         neighbor_addresses = view["neighbors"][direction]
-        rendered = (
-            "[" + " ".join(neighbor_addresses) + "]" if neighbor_addresses else "-"
-        )
+        rendered = "[" + " ".join(neighbor_addresses) + "]" if neighbor_addresses else "-"
         sys.stdout.write(f"{direction:<8} {rendered}\n")
     return EXIT_OK
 
@@ -959,19 +938,19 @@ def _open_target(
 def _describe_docked(
     address: str, verb: str
 ) -> Callable[[dict[str, Any], str | None], str]:
-    """The stderr line for a docking op: the panel it created when it created one (a bare app address
-    would otherwise match whichever instance of the app was docked first), else the one it named."""
+    """The stderr line for an op that opens or moves a window: the instance it created when it
+    created one (a bare app address would otherwise match whichever instance was open first),
+    else the one it named, with the desktop it left behind."""
 
     def describe(layout: dict[str, Any], created: str | None) -> str:
-        docked_address = created if created is not None else address
-        leaf = _find_leaf_for_address(layout, docked_address)
-        docked = _find_panel_summary(layout, docked_address)
+        opened_address = created if created is not None else address
+        window = _find_window(layout, opened_address)
         shown = (
-            str(docked.get("address"))
-            if docked and isinstance(docked.get("address"), str)
-            else docked_address
+            str(window.get("address"))
+            if window is not None and isinstance(window.get("address"), str)
+            else opened_address
         )
-        return f"{verb} {shown} in {_describe_group(leaf)}\n"
+        return f"{verb} {shown} in {_describe_desktop(layout)}\n"
 
     return describe
 
@@ -984,6 +963,9 @@ def _cmd_open(args: argparse.Namespace) -> int:
     payload: dict[str, Any] = {
         "address": address,
         "new_group": bool(args.new_group),
+        "relative_to": args.relative_to,
+        "direction": args.direction,
+        "ratio": args.ratio,
         **create_args,
         **_target_args(args.view, args.client),
     }
@@ -1395,7 +1377,7 @@ def main(argv: list[str] | None = None) -> int:
     p_load.set_defaults(func=_cmd_load)
 
     p_where = subparsers.add_parser(
-        "where", help="Show one panel's group tab-mates and its neighbors"
+        "where", help="Show where one window sits and what lies around it"
     )
     p_where.add_argument("address", help="Panel address (bare app name accepted)")
     p_where.add_argument(
@@ -1410,17 +1392,36 @@ def main(argv: list[str] | None = None) -> int:
     _add_client_argument(p_where)
     p_where.set_defaults(func=_cmd_where)
 
-    p_open = subparsers.add_parser("open", help="Surface an instance in the UI")
+    p_open = subparsers.add_parser("open", help="Surface an instance in a window beside your own chat's")
     p_open.add_argument(
         "target",
-        help="An address (``app:terminal?instance=terminal-2`` docks that instance; ``app:docs`` docks a "
-        "single-instance app's one tab), a bare app name, or a URL. A bare name of an app with instances "
+        help="An address (``app:terminal?instance=terminal-2`` opens that instance; ``app:docs`` opens a "
+        "single-instance app's one window), a bare app name, or a URL. A bare name of an app with instances "
         "creates a fresh one (with --action and --param) and prints its address; a URL opens a new browser on it.",
     )
     p_open.add_argument(
         "--new-group",
         action="store_true",
-        help="Force a brand-new dock group instead of tabbing into an existing right-side group.",
+        help="Accepted and ignored: the desktop has no tab groups.",
+    )
+    # An open tiles against the caller's own window, so it steers like a split. Unlike a split
+    # these are preferences: an anchor that has no window makes the window cascade, not an error.
+    p_open.add_argument(
+        "--relative-to",
+        default=_SELF_REF,
+        help="Address to open beside. ``self`` (default) resolves to the caller's own chat window.",
+    )
+    p_open.add_argument(
+        "--direction",
+        default="right",
+        choices=_DIRECTIONS,
+        help="Which side of the desktop the new window takes; ``within`` gives it the anchor's own rectangle.",
+    )
+    p_open.add_argument(
+        "--ratio",
+        type=float,
+        default=0.5,
+        help="Fraction of the desktop the new window takes (0..1); ignored with --direction=within.",
     )
     _add_create_arguments(p_open)
     _add_view_argument(p_open, _MUTATING_VIEW_HELP)
@@ -1428,33 +1429,33 @@ def main(argv: list[str] | None = None) -> int:
     p_open.set_defaults(func=_cmd_open)
 
     p_focus = subparsers.add_parser(
-        "focus", help="Activate the named panel within its group"
+        "focus", help="Raise a window to the front"
     )
     p_focus.add_argument("address", help="Panel address")
     _add_view_argument(p_focus, _MUTATING_VIEW_HELP)
     _add_client_argument(p_focus)
     p_focus.set_defaults(func=_cmd_focus)
 
-    p_split = subparsers.add_parser("split", help="Open a new panel as a split")
+    p_split = subparsers.add_parser("split", help="Tile a new window against another")
     p_split.add_argument(
-        "target", help="Address, bare app name, or URL to open as the new panel"
+        "target", help="Address, bare app name, or URL to open as the new window"
     )
     p_split.add_argument(
         "--relative-to",
         default=_SELF_REF,
-        help="Address to split relative to. ``self`` (default) resolves to the caller's chat panel.",
+        help="Address to split relative to. ``self`` (default) resolves to the caller's own chat window.",
     )
     p_split.add_argument(
         "--direction",
         default="right",
         choices=_DIRECTIONS,
-        help="Where to place the new panel relative to the anchor; ``within`` tabs it into the anchor's own group.",
+        help="Which side of the desktop the new window takes; ``within`` gives it the anchor's own rectangle.",
     )
     p_split.add_argument(
         "--ratio",
         type=float,
         default=0.6,
-        help="Fraction the new panel occupies (0..1); ignored with --direction=within.",
+        help="Fraction of the desktop the new window takes (0..1); ignored with --direction=within.",
     )
     p_split.add_argument(
         "--new-group",
@@ -1466,14 +1467,14 @@ def main(argv: list[str] | None = None) -> int:
     _add_client_argument(p_split)
     p_split.set_defaults(func=_cmd_split)
 
-    p_close = subparsers.add_parser("close", help="Remove a panel")
+    p_close = subparsers.add_parser("close", help="Put a window away; what it shows keeps running")
     p_close.add_argument("address", help="Panel address")
     _add_view_argument(p_close, _MUTATING_VIEW_HELP)
     _add_client_argument(p_close)
     p_close.set_defaults(func=_cmd_close)
 
     p_move = subparsers.add_parser(
-        "move", help="Relocate an existing panel (state-preserving)"
+        "move", help="Snap an open window beside another (its page is not reloaded)"
     )
     p_move.add_argument("address", help="Panel address to move")
     p_move.add_argument(
@@ -1483,7 +1484,7 @@ def main(argv: list[str] | None = None) -> int:
         "--direction",
         required=True,
         choices=_DIRECTIONS,
-        help="Where to land the moved panel; ``within`` tabs it into the anchor's own group.",
+        help="Which side of the desktop the moved window takes; ``within`` gives it the anchor's own rectangle.",
     )
     p_move.add_argument(
         "--new-group",
@@ -1525,7 +1526,7 @@ def main(argv: list[str] | None = None) -> int:
     p_start.set_defaults(func=_cmd_start)
 
     p_max = subparsers.add_parser(
-        "maximize", help="Maximize a panel's group on the target client's screen"
+        "maximize", help="Fill the target client's desktop with one window"
     )
     p_max.add_argument("address", help="Panel address")
     _add_client_argument(p_max)

@@ -1,9 +1,7 @@
 @import "tailwindcss" source(none);
-@import "dockview-core/dist/styles/dockview.css";
 /* The design system: colour and type tokens, the typography roles, the base layer and the
    component keyframes, shared with every other frontend of the workspace (see
-   system/libs/workspace_ui). What follows is the shell's own: the rail, the dock and its
-   tabs, the launcher. */
+   system/libs/workspace_ui). What follows is the desktop's own. */
 @import "@imbue/workspace-ui/src/base.css";
 
 /* Why explicit sources (`source(none)` + `@source`): the utility classes live in
@@ -13,634 +11,1110 @@
    with `@source inline("...")`. */
 @source "./**/*.ts";
 
-/* The machine rail's scrollbar. The rail overlays the panels to its right
-   while expanded, and the app list's scrollbar must not eat into the 37px the
-   icons need, so it is transparent until the rail is hovered. */
-.machine-sidebar ::-webkit-scrollbar {
-  width: 6px;
-}
+/* The desktop.
 
-.machine-sidebar ::-webkit-scrollbar-track {
-  background: transparent;
-}
+   This surface was designed as a working prototype and signed off by the user round by round, so
+   what follows is that design carried over rather than re-derived from the token layer: the
+   values here (the 58px icon tiles, the 42px title bar, the 52px dock, the shadow ramps) are the
+   ones that were agreed on. The design system defers to the user by its own rule, and this is
+   that case.
 
-.machine-sidebar ::-webkit-scrollbar-thumb {
-  background: transparent;
-  border-radius: var(--radius-sm);
-}
-
-.machine-sidebar:hover ::-webkit-scrollbar-thumb {
-  background: var(--c-border);
-}
-
-.machine-sidebar:hover ::-webkit-scrollbar-thumb:hover {
-  background: var(--c-text-faint);
-}
-
-/* Workspace surface: the connected tab card.
-   The whole content area is one flat grey canvas, and every pane is a white
-   card floating on it whose active tab is physically part of the card. The
-   pieces that make that read as one shape:
-
-   - the canvas runs edge to edge. A 4px top padding is the gap the outermost
-     panes sit in against the title bar above, rather than a rim of some other
-     color; the left, right and bottom edges carry no padding, so the dock
-     sits flush against the viewport there;
-   - each group insets itself 2px, which puts 4px of bare canvas between two
-     adjacent panes -- that gap is the whole of a split separator;
-   - the tab strip paints nothing, so it is canvas with labels on it. The active
-     tab is the only white one, carries the card's hairline on its top/left and
-     right, and the pane below is pulled up 1px so its own top border passes
-     underneath the tab rather than cutting across the junction;
-   - the pane's top-left corner is square only when the FIRST tab is active,
-     because that is the one case where the tab meets the corner and the two
-     outlines have to continue into each other.
-
-   The machine's accent belongs to chrome: the send button and the focus ring
-   below use it, and nothing here does -- no accent wash on a card, a canvas or
-   a tab strip.
-
-   DARK MODE IS UNDECIDED (§1 of the design says "dark mode TBD"), and this app
-   carries no dark tokens of its own. The values below are therefore the light
-   design serving as the default in both schemes; when the dark canvas is
-   settled it belongs here, as a `prefers-color-scheme` override.
-
-   This rule is only the --si-* parameter table for the dockview theme below
-   (the canvas paint itself -- bg + edge padding -- is utilities in
-   views/App.ts). */
-.app-main {
-  --si-canvas: rgb(245 245 245);
-  --si-pane-surface: var(--c-surface);
-  --si-pane-border: rgba(0, 0, 0, 0.09);
-  --si-pane-radius: 12px;
-  /* A tab's own insets. Named because the drag ghost has to restate them from
-     outside the theme root -- see `body > .dv-tab.dv-dragged .dv-default-tab`
-     -- and the two must not drift. */
-  --si-tab-padding: 6px 12px;
-  --si-tab-gap: 4px;
-  /* The attention flash (see `si-tab-flash`). Amber is deliberately not in the
-     palette's working set: it can only mean "look here for a moment". */
-  --si-tab-flash-color: var(--c-warning-bg);
-  /* Half of the 4px separator: each of the two neighbours contributes its own
-     inset, and the outermost panes get the same half against the canvas edge. */
-  --si-pane-inset: 2px;
-}
-
-.dockview-workspace {
+   DARK MODE IS UNDECIDED, as it was for the dock this replaces, so these are the light values
+   serving as the default in both schemes. */
+#root {
+  --ink: #18181b;
+  --ink-soft: #52525b;
+  --ink-faint: #a1a1aa;
+  --line: #e8e8ec;
+  --surface: #ffffff;
+  --desk: #fdfdfe;
+  --dock-h: 52px;
+  /* The size a tile of a running thing is drawn at, on screen. A long row scrolls rather than
+     shrinking its tiles, so this holds however many there are. ``DOCK_TILE_PX`` in dock.ts is
+     this number; the e2e suite measures the two against each other rather than trusting that. */
+  --dock-tile: 36px;
+  /* A tile whose window is put away is drawn at this size instead. Small enough to read as
+     "away" across the row at a glance, large enough to stay an easy click target. */
+  --dock-tile-offscreen: 26px;
+  /* The ``+`` sits a little under the tiles it opens things into, rather than matching them --
+     it is the one control in the row that is not a running thing, and reads as its own object.
+     The hide control follows it, so the two non-instance buttons agree. */
+  --dock-launch-size: 32px;
+  --dock-gap: 7px;
+  /* How wide the ``+`` opens into its field, and the menu over it. */
+  --dock-launch-open-w: 280px;
+  --radius-win: 16px;
   position: relative;
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  color: var(--ink);
 }
 
-.dockview-agent-container {
+#desktop {
   position: absolute;
-  top: 0;
-  left: 0;
+  inset: 0 0 var(--dock-h) 0;
+  background: radial-gradient(120% 80% at 50% 120%, #f4f5f8 0%, rgba(244, 245, 248, 0) 60%), var(--desk);
+  overflow: hidden;
+  transition: bottom 180ms ease;
 }
 
-/* Dockview theme overrides.
-   The class is doubled to win on specificity. dockview-core does not rely on
-   the stylesheet we import at the top of this file: it *injects its own style
-   element at runtime*, which therefore lands after our linked stylesheet and
-   beats a plain `.dockview-theme-light` rule on document order alone. Anything
-   here that overrides a `--dv-*` default has to stay inside this doubled
-   selector. */
-.dockview-theme-light.dockview-theme-light {
-  --dv-paneview-header-border-color: var(--c-border);
-  /* Everything dockview would paint itself is transparent: the canvas behind
-     the dock is the app's, and the only surface is the pane card. */
-  --dv-background-color: transparent;
-  --dv-group-view-background-color: transparent;
-  --dv-tabs-and-actions-container-background-color: transparent;
-  --dv-activegroup-visiblepanel-tab-background-color: var(--si-pane-surface);
-  --dv-inactivegroup-visiblepanel-tab-background-color: var(--si-pane-surface);
-  --dv-activegroup-hiddenpanel-tab-background-color: transparent;
-  --dv-inactivegroup-hiddenpanel-tab-background-color: transparent;
-  --dv-activegroup-visiblepanel-tab-color: var(--c-text-primary);
-  --dv-activegroup-hiddenpanel-tab-color: var(--c-text-secondary);
-  --dv-inactivegroup-visiblepanel-tab-color: var(--c-text-primary);
-  --dv-inactivegroup-hiddenpanel-tab-color: var(--c-text-secondary);
-  /* Inactive tabs are bare labels: no dividers between them, and no line under
-     the strip. The 4px gap is the separator, so that goes too. */
-  --dv-tab-divider-color: transparent;
-  --dv-separator-border: transparent;
-  --dv-tabs-container-scrollbar-color: var(--c-border);
-  --dv-drag-over-background-color: var(--c-accent-light);
-  --dv-drag-over-border-color: var(--c-accent);
+/* With the dock hiding, it floats *over* the desktop instead of reserving a strip of it --
+   otherwise sliding it away leaves an empty white band where the desktop does not reach. */
+#root.dock-auto #desktop {
+  bottom: 0;
 }
 
-/* The gap between panes. Padding rather than a margin so dockview's own sizing
-   (which writes pixel widths onto the views outside) is left alone. */
-.dockview-theme-light .dv-groupview {
-  padding: var(--si-pane-inset);
+/* The windows' own layer. Like the pages' layer below, it creates no stacking context of its
+   own (no z-index of its own), so a window and the page it is showing still stack against each
+   other by the z-index each carries. */
+#windows {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 
-/* The pane card. It is pulled up 1px so its top border lands on the strip's
-   last row, where the active tab covers it and the junction closes. */
-.dockview-theme-light .dv-groupview > .dv-content-container {
-  margin-top: -1px;
-  background: var(--si-pane-surface);
-  border: 1px solid var(--si-pane-border);
-  border-radius: var(--si-pane-radius);
+/* A window is a frame around a page that is drawn just beneath it, so the window as a whole takes
+   no pointer events: the parts of it that are really there -- its title bar, its resize edges, the
+   shield an unfocused window raises, and a body holding the window's own content -- take them
+   back below. Without this the window's own box would swallow every click meant for its page. */
+#windows > .window {
+  pointer-events: none;
 }
 
-/* Square only where the first tab connects to it. */
-.dockview-theme-light
-  .dv-groupview:has(> .dv-tabs-and-actions-container .dv-tabs-container > .dv-tab:first-child.dv-active-tab)
-  > .dv-content-container {
-  border-top-left-radius: 0;
+.window > .titlebar,
+.window > .resize-handle,
+.window > .window-shield,
+.window > .window-body:not(.holds-page) {
+  pointer-events: auto;
 }
 
-/* Panels render with dockview's "always" renderer, which hoists their content
-   into an overlay layered over the pane rather than inside it. The overlay is
-   sized to the card exactly, so it takes the card's rounded clip here, and a
-   1px transparent border keeps the content off the hairline.
+/* The layer the live pages sit in. It creates no stacking context of its own, so each page stacks
+   among the windows by its own z-index: just under the window showing it, and over every window
+   beneath that one (see surfaceZIndex). */
+#surfaces {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
 
-   The overlay sits outside the group's subtree and carries nothing that says
-   which pane it belongs to, so this clip cannot be the conditional one the card
-   above gets: it rounds all four corners. */
-.dockview-theme-light .dv-render-overlay {
-  border: 1px solid transparent;
-  border-radius: var(--si-pane-radius);
+/* ---------- desktop icons ---------- */
+
+/* The icons' layer is the whole desktop: the grid they sit in spans all of it, so an icon can be
+   at the right edge or along the bottom. Each one is placed at its cell's corner. The layer itself
+   takes no pointer events, so the empty desktop around the icons is still the desktop. */
+#icons {
+  position: absolute;
+  inset: 0;
+  /* No stacking context of its own: the icons sit under the windows in document order, and the
+     one icon in the hand can rise above them all (.is-lifted) without taking the rest along. */
+  z-index: auto;
+  pointer-events: none;
+}
+
+.icon {
+  position: absolute;
+  pointer-events: auto;
+  /* An icon that makes room for one being dragged over it slides to its new cell. */
+  transition:
+    left 160ms cubic-bezier(0.2, 0.8, 0.3, 1),
+    top 160ms cubic-bezier(0.2, 0.8, 0.3, 1);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: 84px;
+  padding: 5px 3px 7px;
+  border: 0;
+  background: transparent;
+  border-radius: 12px;
+  cursor: grab;
+  font: inherit;
+  /* The drag is the desktop's own, on pointer events: the browser must not read it as a scroll
+     or start a native drag with its own cursor and ghost. */
+  touch-action: none;
+  -webkit-user-drag: none;
+}
+
+/* Picked out by a single click. Opening is the double click's job, so the single one has to leave
+   something behind or it reads as the desktop ignoring the press -- a quiet plate, not a
+   highlight, since it says "this one" rather than "look here". */
+.icon.is-selected {
+  background: rgba(16, 18, 27, 0.06);
+}
+
+/* An icon in the hand: the icon itself, lifted off the desktop and following the pointer at full
+   opacity -- not a translucent copy of it. Nothing is transitioned while it moves, so it tracks
+   the pointer exactly; the lift itself is the scale in its transform. */
+/* Just dropped: it lands where the hand left it, with no slide over from its old cell. */
+.icon.is-dropping {
+  transition: none;
+}
+
+.icon.is-lifted {
+  cursor: grabbing;
+  transition: none;
+  z-index: 2147483000; /* design-system-exception: the one thing in the hand, above every window */
+}
+
+/* Hold the closed hand for the whole gesture, wherever the pointer goes. */
+#root.is-arranging-icons,
+#root.is-arranging-icons .icon {
+  cursor: grabbing;
+}
+
+.icon-tile {
+  width: 58px;
+  height: 58px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  box-shadow:
+    0 1px 2px rgba(16, 18, 27, 0.05),
+    0 2px 5px rgba(16, 18, 27, 0.04);
+  transition:
+    transform 140ms cubic-bezier(0.2, 0.8, 0.3, 1),
+    box-shadow 140ms ease;
+}
+
+.icon-tile svg {
+  width: 32px;
+  height: 32px;
+}
+
+/* Hover scales the tile itself: no grey plate behind it. */
+.icon:hover .icon-tile {
+  transform: scale(1.09);
+  box-shadow:
+    0 2px 4px rgba(16, 18, 27, 0.06),
+    0 6px 14px rgba(16, 18, 27, 0.07);
+}
+
+.icon:active .icon-tile {
+  transform: scale(1.02);
+}
+
+/* A lifted icon scales as one piece, tile and label together, so the whole thing reads as picked
+   up: the tile's own hover and press scales are dropped rather than compounded with it, and its
+   shadow deepens to match the height. After the hover and press rules, which it overrides. */
+.icon.is-lifted .icon-tile,
+.icon.is-lifted:hover .icon-tile {
+  transform: none;
+  transition: none;
+  box-shadow:
+    0 4px 10px rgba(16, 18, 27, 0.1),
+    0 14px 30px rgba(16, 18, 27, 0.12);
+}
+
+.icon-label {
+  font-size: 11.5px;
+  line-height: 1.25;
+  color: #3f3f46;
+  text-align: center;
+  letter-spacing: -0.005em;
+}
+
+/* ---------- windows ---------- */
+
+.window {
+  position: absolute;
+  min-width: 340px;
+  min-height: 200px;
+  /* No background of its own: the page it frames is drawn just BENEATH it, so anything painted
+     across the window's box would hide it. The title bar and a body holding the window's own
+     content paint their own surface; the shadow and the 1px ring below need no fill. */
+  background: transparent;
+  border-radius: var(--radius-win);
+  box-shadow:
+    0 0 0 1px rgba(16, 18, 27, 0.05),
+    0 2px 6px rgba(16, 18, 27, 0.05),
+    0 24px 56px rgba(16, 18, 27, 0.12);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
-/* A live surface is a .dv-render-overlay we own rather than one dockview owns.
-   There is one per object, machine-wide, created when the object is first
-   opened and left in the DOM until the object is destroyed -- because removing
-   an iframe destroys its document and re-parenting one reloads it. Its rect
-   and its visibility are mirrored from whichever pane is showing it, so it
-   carries the same clip as the overlays beside it and only the layout differs.
-   It is hidden with `display: none`, exactly as dockview hides an inactive
-   tab's content.
+.window.is-maximized {
+  border-radius: 0;
+  box-shadow: none;
+}
 
-   The selector is doubled on purpose: dockview's own `.dv-render-overlay` rule
-   declares `z-index: 1` at the same specificity and is loaded after this file,
-   so a bare `.si-live-surface` would lose the tie. */
-.dv-render-overlay.si-live-surface {
+/* Minimized is out of sight and still loaded: the page keeps running behind it, which is what
+   makes bringing it back instant. */
+.window.is-minimized {
+  display: none;
+}
+
+.window.is-dragging,
+.window.is-resizing {
+  user-select: none;
+}
+
+.titlebar {
+  height: 42px;
+  flex: 0 0 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 0 10px;
+  cursor: grab;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+}
+
+.window.is-dragging .titlebar {
+  cursor: grabbing;
+}
+
+.titlebar-chip {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 30px;
+}
+
+.titlebar-chip svg {
+  width: 17px;
+  height: 17px;
+}
+
+.titlebar-title {
+  flex: 1 1 auto;
+  font-size: 14.5px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.win-btn {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  color: #71717a;
+  transition:
+    background 110ms ease,
+    color 110ms ease;
+}
+
+.win-btn:hover {
+  background: #f1f1f4;
+  color: var(--ink);
+}
+
+.win-btn.win-close:hover {
+  background: #fdecec;
+  color: #dc2626;
+}
+
+.win-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.window-body {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  background: #fff;
+}
+
+/* A window sits just above its own page, so that its resize edges and its focus shield can reach
+   in over it. The part of the window the page shows through therefore has to be see-through in
+   both senses: no background, and no appetite for pointer events, or it would take every click,
+   scroll and keystroke meant for the page behind it. Both have to be said here rather than on the
+   slot inside it, since a slot that ignores pointers just hands them to its parent. */
+.window-body.holds-page {
+  background: transparent;
+  pointer-events: none;
+}
+
+/* The box a page is drawn through. It holds nothing itself: the page lives in the desktop's own
+   layer so that moving, minimizing or restacking a window never reloads it. */
+.window-slot {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The chat list down the left of a listing app's window is the window's own, not the page's: it
+   takes pointers again, inside a body that otherwise lets them through to the page. */
+.window-body.holds-page > .chat-sidebar {
+  pointer-events: auto;
+  /* Inside the window's rounded outline, which the window itself does not clip its children to. */
+  border-bottom-left-radius: var(--radius-win);
+}
+.window.is-maximized .window-body.holds-page > .chat-sidebar {
+  border-bottom-left-radius: 0;
+}
+
+.window.is-dragging .window-body,
+.window.is-resizing .window-body {
+  pointer-events: none;
+}
+
+.window-note {
+  flex: 1 1 auto;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 6px;
+  color: var(--ink-faint);
+  font-size: 13px;
+  padding: 20px;
+  text-align: center;
+}
+
+.window-note-lead {
+  color: var(--ink-soft);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* A window whose instance no longer exists: kept, because its app may list it again, but drawn as
+   the empty frame it is rather than as a window that has broken. Its title is the last name it was
+   known by (see windowTitle) -- never its address. It has no dock tile either, since the dock is
+   only what is RUNNING, and nothing is. */
+.window.is-unavailable .titlebar-title,
+.window.is-unavailable .titlebar-chip {
+  opacity: 0.55;
+}
+
+.resize-handle {
+  position: absolute;
+  z-index: 2; /* design-system-exception: within a window, above its own body so an edge stays grabbable */
+}
+
+.resize-e {
+  top: 0;
+  right: -3px;
+  width: 8px;
+  height: 100%;
+  cursor: ew-resize;
+}
+
+.resize-s {
+  bottom: -3px;
+  left: 0;
+  height: 8px;
+  width: 100%;
+  cursor: ns-resize;
+}
+
+.resize-w {
+  top: 0;
+  left: -3px;
+  width: 8px;
+  height: 100%;
+  cursor: ew-resize;
+}
+
+.resize-n {
+  top: -3px;
+  left: 0;
+  height: 8px;
+  width: 100%;
+  cursor: ns-resize;
+}
+
+.resize-se {
+  bottom: -3px;
+  right: -3px;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+
+.resize-sw {
+  bottom: -3px;
+  left: -3px;
+  width: 16px;
+  height: 16px;
+  cursor: nesw-resize;
+}
+
+.resize-ne {
+  top: -3px;
+  right: -3px;
+  width: 16px;
+  height: 16px;
+  cursor: nesw-resize;
+}
+
+.resize-nw {
+  top: -3px;
+  left: -3px;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+
+.window.is-maximized .resize-handle {
+  display: none;
+}
+
+/* A window that is not in front catches every press on itself and turns it into "come forward",
+   so a click meant to reach a window cannot press a button inside it by accident. Invisible, and
+   gone the moment the window is in front. It does not cover the resize edges, which sit above it:
+   grabbing an edge raises the window and resizes it in one gesture. */
+.window-shield {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+  background: transparent;
+  cursor: default;
+}
+
+/* The live pages. One per instance, machine-wide, positioned over whichever window is showing
+   it and never re-parented -- re-parenting an iframe reloads the document inside it. */
+.si-live-surface {
   position: absolute;
   display: flex;
   flex-direction: column;
-  /* Above the (now empty) panel overlay standing in for it, which is a sibling
-     at z-index 1 and comes later in the DOM. */
-  z-index: 2; /* design-system-exception: must be exactly one above dockview's own z-index:1 render-overlay (see comment above); the z scale has no "content + 1" layer */
+  overflow: hidden;
+  pointer-events: auto;
+  /* The page stands in for the window's body, so it carries the body's own surface: a page still
+     loading, or a window showing a message instead of a page, must not let the desktop show
+     through the window it is inside. */
+  background: var(--surface);
 }
 
-/* While a tab is being dragged the surface stops taking pointer events, so the
-   drag reaches the panel overlay underneath -- which is what forwards it to the
-   pane's drop target. */
+/* While a window is being dragged or resized the pages stop taking pointer events, so the
+   gesture is not swallowed by a framed page the pointer crosses. */
 .si-live-surface--drag {
   pointer-events: none;
 }
 
-/* The slot a panel is reduced to: it holds no content, it just gives dockview a
-   pane-sized box to position and dispose. */
-.si-live-slot {
-  width: 100%;
-  height: 100%;
-}
+/* ---------- renaming a window ---------- */
 
-.dockview-theme-light .dv-tabs-and-actions-container {
-  /* Above the pane, so the active tab's white closes over the 1px of card
-     border the negative margin above tucked under the strip. */
-  position: relative;
-  z-index: var(--z-content);
-}
-
-/* The "+" belongs immediately after the pane's tabs; dockview's void container
-   (the drop region that eats the leftover width) is what would otherwise push
-   it to the far edge, so it is ordered last instead. */
-.dockview-theme-light .dv-void-container {
-  order: 1;
-}
-
-.dockview-theme-light .dv-tab {
-  height: 100%;
-  /* No padding of its own -- `.dv-default-tab` inside fills the tab and carries
-     the insets, so the tab's box is exactly the card shape. */
-  padding: 0;
-  border: 1px solid transparent;
-  border-bottom: none;
-  border-radius: var(--si-pane-radius) var(--si-pane-radius) 0 0;
-}
-
-/* The attention flash: what a tab does when it is opened again while already
-   open. The click has to answer for itself, and the answer cannot be "the tab
-   is now active" -- it usually already was, which is the whole reason nothing
-   appeared to happen.
-
-   A wash of colour rather than an opacity blink: fading the tab out and back
-   reads as the tab going away, which is the opposite of "here it is". Amber
-   because it is the one hue this workspace does not otherwise use -- the
-   accent means active and green, and grey is every resting state -- so the
-   flash cannot be mistaken for a state the tab has entered and stayed in.
-
-   Driven by a class rather than the Web Animations API so the keyframes sit
-   with the rest of the tab's appearance, and so `prefers-reduced-motion` can
-   reach it. */
-@keyframes si-tab-flash {
-  0%,
-  100% {
-    background-color: transparent;
-  }
-  25%,
-  75% {
-    background-color: var(--si-tab-flash-color);
-  }
-}
-
-.dockview-theme-light .dv-tab.si-tab-flash {
-  animation: si-tab-flash 320ms ease-in-out 2;
-}
-
-/* Reduced motion still needs the acknowledgement, just not the pulsing: one
-   hold and release rather than two round trips. */
-@media (prefers-reduced-motion: reduce) {
-  .dockview-theme-light .dv-tab.si-tab-flash {
-    animation: si-tab-flash 320ms ease-in-out 1;
-  }
-}
-
-/* The drag ghost: dockview-core clones the dragged `.dv-tab` (tab.js,
-   `dragHandler.onDragStart`), copies its FULL computed style onto the clone
-   as inline styles, and appends the clone as a direct child of `<body>`
-   (dnd/ghost.js's `addGhostImage`) so the browser can use it as the drag
-   image. The clone therefore inherits this tab's square BOTTOM corners --
-   which exist only so a connected tab can meet the pane card below it -- but
-   the ghost has no pane under it while it floats, so it reads as a
-   half-rounded chip instead of a floating card. `body > .dv-tab` reaches
-   only that clone: every live tab is nested many levels deeper, under
-   `.dockview-theme-light`, never a direct child of `<body>`. `!important` is
-   required because the copied computed style already sets `border-radius`
-   inline, which otherwise beats any selector here regardless of specificity. */
-body > .dv-tab.dv-dragged {
-  border-radius: var(--si-pane-radius) !important;
-}
-
-/* The ghost's INSIDE, for the same reason: the clone carries the outer
-   `.dv-tab`'s computed style as inline styles, but only that element's -- its
-   descendants keep their classes and lose every rule that was scoped under
-   `.dockview-theme-light`, because the clone hangs off `<body>` and no longer
-   has that ancestor (and `padding`/`gap` are not inherited). Restated here
-   from the same variables the live tab uses, so a dragged tab looks like the
-   tab it came from. */
-body > .dv-tab.dv-dragged .dv-default-tab {
-  padding: var(--si-tab-padding);
-  gap: var(--si-tab-gap);
-}
-
-.dockview-theme-light .dv-tab.dv-active-tab {
-  border-color: var(--si-pane-border);
-}
-
-/* Hovering an inactive tab paints NOTHING. A fill at the strip's edges always
-   fights the pane's rounded corner below it and reads as a boxy cutoff,
-   so the hover affordance is everything except a
-   background: the pointer cursor, the icon and title recoloring to the
-   primary text color, and the tab's own action buttons appearing -- which the
-   strip already reveals on hover. Spelled out down the whole chain because
-   that is the shape dockview paints tab states with, and a shorter selector
-   would simply lose to it. */
-.dockview-theme-light
-  .dv-groupview
-  > .dv-tabs-and-actions-container
-  .dv-tabs-container
-  > .dv-tab.dv-inactive-tab:hover {
-  cursor: pointer;
-}
-
-/* Tab overflow: the "N more" dropdown at the strip's right edge.
-   dockview builds this from theme variables this app sets to transparent (the
-   divider is the tab gap, the group background is the canvas), so untouched it
-   renders as bare text floating over the pane. It is a menu, so it wears the
-   same chrome as every other floating card. */
-.dockview-theme-light .dv-tabs-overflow-dropdown-default {
-  gap: --spacing(1);
-  padding: 0 --spacing(1.5);
-  border-radius: var(--radius-md);
-  color: var(--c-text-secondary);
-  font-size: var(--font-size-helper);
-  cursor: pointer;
-}
-
-.dockview-theme-light .dv-tabs-overflow-dropdown-default:hover {
-  background-color: var(--c-fill-hover);
-  color: var(--c-text-primary);
-}
-
-.dockview-theme-light .dv-tabs-overflow-container {
-  min-width: 160px;
-  padding: --spacing(1) 0;
-  border: 1px solid var(--c-border);
-  border-radius: var(--radius-lg);
-  background-color: var(--c-surface);
-  box-shadow: var(--shadow-overlay);
-}
-
-/* Rows. The strip's card shape does not belong here -- inside a menu a tab is
-   just a row -- so the radius, the fixed equal width and the per-row divider
-   all stand down, and the active tab is told apart by weight rather than by a
-   second surface. */
-.dockview-theme-light .dv-tabs-overflow-container .dv-tab {
-  width: auto;
-  height: 32px;
-  padding: 0 --spacing(3);
-  border: none;
-  border-radius: 0;
-  background-color: transparent;
-  cursor: pointer;
-}
-
-.dockview-theme-light .dv-tabs-overflow-container .dv-tab:hover {
-  background-color: var(--c-fill-hover);
-}
-
-.dockview-theme-light .dv-tabs-overflow-container .dv-tab.dv-active-tab .dv-default-tab-content {
-  font-weight: 600;
-}
-
-/* Recoloring, not bolding: color needs no fixed-width guard the way weight
-   did (a heavier face is physically wider; a different color is not), and it
-   is precisely the kind of affordance that is not a fill -- see the comment
-   above this tab strip's other hover rule for why a fill is off the table.
-   Both the icon and the title move to the primary text color together. */
-.dockview-theme-light .dv-tab.dv-inactive-tab:hover .dv-custom-tab-icon,
-.dockview-theme-light .dv-tab.dv-inactive-tab:hover .dv-default-tab-content {
-  color: var(--c-text-primary);
-}
-
-/* dockview outlines a focused tab in the (now transparent) divider color, so
-   the keyboard ring is spelled out here instead -- in the accent, which is
-   where the accent is allowed. */
-.dockview-theme-light .dv-tab:focus-visible::after {
-  outline: 2px solid var(--c-accent) !important;
-  outline-offset: -2px;
-}
-
-.dockview-theme-light .dv-default-tab {
-  font-family: var(--font-sans);
-  font-size: var(--font-size-body);
-  font-weight: 500;
-  padding: var(--si-tab-padding);
-  gap: --spacing(2);
-}
-
-.dockview-theme-light .dv-default-tab-action svg {
-  width: 12px;
-  height: 12px;
-}
-
-/* Drag and drop.
-   A drop onto a PANE and a drop onto a TAB are different questions and get
-   different answers. "Which side of this pane?" is a region, so it stays a
-   filled wash -- but a neutral grey light enough to read the pane through,
-   rather than dockview's opaque blue-grey slab. "Before or after this tab?" is
-   a position BETWEEN two tabs, not a region, so it draws as an insertion line
-   at that edge instead of shading half of the neighbouring tab.
-
-   Every drop target paints the same way -- a `dv-drop-target-selection` sized
-   to the half it would take -- so the tab case is picked out structurally, by
-   the selection sitting inside a `.dv-tab`. dockview only thins the selection
-   into a line by itself when the target is under 100px wide, and a tab here is
-   never allowed to get that narrow (the strip holds them at a 140px floor), so
-   left it alone every tab drop reads as a block over half its neighbour.
-
-   The selection's box is an inline style, animated between targets, so the
-   line is a pseudo-element on the edge the selection already sits against
-   rather than an attempt to resize it: a left-drop selection covers the tab's
-   left half, so its left edge IS the seam the tab would land on, and a
-   right-drop selection's right edge likewise.
-
-   Only the left/right variants lose their fill. A drop onto the empty end of
-   the strip has no side to it and keeps the wash, which is what says the drop
-   will land there at all. */
-.dockview-theme-light.dockview-theme-light {
-  --dv-drag-over-background-color: rgba(0, 0, 0, 0.06);
-  --dv-drag-over-border-color: transparent;
-}
-
-.dockview-theme-light.dockview-theme-light .dv-tab .dv-drop-target-selection.dv-drop-target-left,
-.dockview-theme-light.dockview-theme-light .dv-tab .dv-drop-target-selection.dv-drop-target-right {
-  background-color: transparent;
-}
-
-.dockview-theme-light.dockview-theme-light .dv-tab .dv-drop-target-selection.dv-drop-target-left::after,
-.dockview-theme-light.dockview-theme-light .dv-tab .dv-drop-target-selection.dv-drop-target-right::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  border-radius: 1px; /* design-system-exception: one-off; half of this 2px insertion caret's width, so it reads as a rounded line, not a scale radius */
-  /* Neutral, like everything else on the dock: the accent is chrome's, and an
-     insertion caret here would be the one accent-colored thing in the pane. */
-  background: var(--c-text-primary);
-}
-
-.dockview-theme-light.dockview-theme-light .dv-tab .dv-drop-target-selection.dv-drop-target-left::after {
-  left: 0;
-}
-
-.dockview-theme-light.dockview-theme-light .dv-tab .dv-drop-target-selection.dv-drop-target-right::after {
-  right: 0;
-}
-
-.dockview-add-tab-wrapper {
-  position: relative;
-  display: flex;
-  align-items: center;
-  /* Full height so align-items:center vertically centers the + within the tab
-     bar (its parent .dv-left-actions-container is display:block, 35px tall). */
-  height: 100%;
-  padding: 0 --spacing(1);
-}
-
-.dockview-add-tab-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: none;
-  background: none;
-  color: var(--c-text-secondary);
-  font-size: 18px; /* design-system-exception: icon glyph (+ add-tab), not text */
-  font-weight: 300;
-  cursor: pointer;
-  line-height: 1;
-  border-radius: var(--radius-md);
-  transition:
-    background 100ms,
-    color 100ms;
-}
-
-.dockview-add-tab-button:hover {
-  background: var(--c-fill-hover);
-  color: var(--c-text-primary);
-}
-
-/* The color swatches and the squiggle cells of the project settings modal. They
-   are the only toggles a modal carries, so ``aria-pressed`` is what tells them
-   apart from its Cancel/Save row. Their size, fill and selection ring are set
-   inline (the ring is the project's own color), leaving the grids' shared
-   feedback here. */
-.modal-card button[aria-pressed] {
-  transition: transform var(--dur-fast) ease-out;
-}
-
-.modal-card button[aria-pressed]:hover {
-  transform: scale(1.08);
-}
-
-/* Both a ring and an outline, because an inline style always wins: a swatch
-   carries its selection ring as ``outline`` and a squiggle cell carries its own
-   as ``box-shadow``, so whichever property is spoken for on a given cell, the
-   other one still shows the focus. */
-.modal-card button[aria-pressed]:focus-visible {
-  outline: 2px solid var(--c-accent);
-  outline-offset: 2px;
-  box-shadow:
-    0 0 0 2px var(--c-surface),
-    0 0 0 4px var(--c-accent);
-}
-
-/* 4px normalizes the tab's internal spacing (icon to title, and title to the
-   hover-revealed actions) to the sidebar's own icon-to-label gap (`gap-1` on
-   the rail's row classes in Sidebar.ts). The selector has to repeat both
-   classes: `createCustomTab` sets `className = "dv-default-tab dv-custom-tab"`
-   on the same element, so a bare `.dv-custom-tab` here loses on specificity to
-   `.dockview-theme-light .dv-default-tab`'s own `gap` above. */
-.dockview-theme-light .dv-default-tab.dv-custom-tab {
-  gap: var(--si-tab-gap);
-}
-
-/* The status dot on every tab: what the instance is doing, as its app reports it
-   (contracts.md section 4.1). Grey (the default) is idle. Color, from data-status, is the
-   primary signal; ``currentColor`` carries the hue so the shape variants below render in
-   that same color without repeating it. */
-.dv-tab-process-dot {
-  box-sizing: border-box;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex-shrink: 0;
-  color: var(--c-text-secondary);
-  background: currentColor;
-}
-
-/* Working -- green. */
-.dv-tab-process-dot[data-status="working"] {
-  color: var(--c-accent);
-}
-
-/* Waiting on the user -- yellow. */
-.dv-tab-process-dot[data-status="attention"] {
-  color: var(--c-warning);
-}
-
-/* Failed -- red. */
-.dv-tab-process-dot[data-status="error"] {
-  color: var(--c-danger);
-}
-
-/* Stopped -- a hollow grey ring: the instance is known but nothing is running it. */
-.dv-tab-process-dot[data-status="stopped"] {
-  background: transparent;
-  border: 1.5px solid currentColor;
-}
-
-/* Unavailable -- a dashed grey ring: the app does not list the instance right now. */
-.dv-tab-process-dot[data-status="unavailable"] {
-  background: transparent;
-  border: 1.5px dashed currentColor;
-}
-
-/* The inline rename editor, swapped in for the title on a double-click. It
-   takes the title's own box so the tab neither grows nor jumps as it opens,
-   and inherits the tab's type so the name reads the same while it is being
-   typed as it will once it is committed. The accent ring is the only thing
-   that marks it as editable. */
-.dv-custom-tab-title-input {
+.title-rename {
   flex: 1 1 auto;
   min-width: 0;
-  padding: 0 3px;
-  border: 1px solid var(--c-accent);
-  border-radius: var(--radius-sm);
-  outline: none;
-  background: var(--c-bg);
-  color: var(--c-text-primary);
+  border: 1px solid #c8c8d0;
+  border-radius: 7px;
+  padding: 3px 7px;
   font: inherit;
+  font-size: 14.5px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  background: #fff;
+  outline: none;
 }
 
-.dv-custom-tab-actions {
+.title-rename:focus {
+  border-color: #18181b;
+}
+
+/* ---------- make something ---------- */
+
+.make-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 26px 30px 36px;
+  background: #fff;
+}
+
+.make-heading {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 0 0 14px;
+}
+
+.make-heading.is-later {
+  margin-top: 34px;
+}
+
+.start-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(238px, 1fr));
+  gap: 10px;
+}
+
+.start-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 16px 16px 17px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    border-color 130ms ease,
+    box-shadow 130ms ease,
+    transform 130ms ease;
+}
+
+.start-tile:hover {
+  border-color: #dcdce2;
+  box-shadow:
+    0 2px 5px rgba(16, 18, 27, 0.05),
+    0 10px 24px rgba(16, 18, 27, 0.06);
+  transform: translateY(-1px);
+}
+
+/* 500, not 550: the system UI stack has no 550 face, so the browser synthesises one and the
+   text reads as outlined. */
+.start-tile-title {
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.start-tile-desc {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+.shelf-title {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+  margin: 22px 0 10px;
+}
+
+.shelf-status {
+  font-size: 12.5px;
+  color: var(--ink-faint);
+  margin: 12px 0;
+}
+
+.shelf {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  scroll-snap-type: x proximity;
+}
+
+.template-card {
+  flex: 0 0 214px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  padding: 0;
+  scroll-snap-align: start;
+}
+
+/* Art in a 3:2 frame with the title and byline under it. */
+.template-thumb {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #f4f4f7;
+  transition:
+    box-shadow 130ms ease,
+    transform 130ms ease,
+    border-color 130ms ease;
+}
+
+.template-card:hover .template-thumb {
+  transform: translateY(-2px);
+  border-color: #dcdce2;
+  box-shadow:
+    0 2px 5px rgba(16, 18, 27, 0.05),
+    0 10px 24px rgba(16, 18, 27, 0.07);
+}
+
+.template-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.template-title {
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-byline {
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+/* ---------- dock ---------- */
+
+#dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--dock-h);
   display: flex;
   align-items: center;
-  gap: --spacing(0.5);
-  margin-left: --spacing(1);
+  gap: 10px;
+  padding: 0 14px;
+  background: rgba(255, 255, 255, 0.86);
+  backdrop-filter: blur(14px);
+  border-top: 1px solid var(--line);
+  z-index: 5000; /* design-system-exception: the dock floats over every window, which carry their own stacking order */
+  transition: transform 200ms cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 
-/* The tab-action buttons (close, kebab) wear the shared ghost icon-Button
- * recipe (buttonClass in the workspace_ui library's components/Button.ts) for their box, radius and
- * hover square; `.dv-custom-tab-action` is only a bare marker the E2E
- * selectors query, and the 12px glyph size is set on the icon markup at the
- * call site. Only the `.dv-custom-tab-actions` container styling lives here. */
-
-/* The New Tab page's template rails scroll sideways beside their paging arrows; the scrollbar
-   itself is hidden (no utility reaches the pseudo-element), and the cut-off card at the rail's
-   edge is what says there is more.
-
-   Each end that still has rail past it fades out. The fade is an overlay rather than a mask on the
-   scroller, so showing and hiding it is opacity -- which is why it has to be painted in the
-   surface colour and kept in step with it, hence color-mix off --c-surface and not a literal
-   white.
-
-   The twelve stops are an eased ramp, (1-x)^2.2, and they do not simplify to a two-stop gradient:
-   the eye reads lightness, not alpha, so over a near-black card two plain stops band at ~12 L* per
-   pixel where this holds ~2.9. 30px cannot do much better than that whatever the stops, so if this
-   still looks banded the lever is more width, not a different curve.
-
-   Only an end the rail can scroll towards is faded (the view sets the opacity), so a card at rest
-   against an edge is never dimmed and the hover lift stays whole there. */
-.new-tab-template-rail {
-  scrollbar-width: none;
+#dock.is-hidden {
+  transform: translateY(100%);
 }
 
-.new-tab-template-rail::-webkit-scrollbar {
+#dock-hover-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 10px;
+  z-index: 4999; /* design-system-exception: immediately under the dock it brings back */
   display: none;
 }
 
-.new-tab-template-rail-fade-start {
-  background-image: linear-gradient(
-    to right,
-    color-mix(in srgb, var(--c-surface) 100%, transparent) 0%,
-    color-mix(in srgb, var(--c-surface) 82.58%, transparent) 8.33%,
-    color-mix(in srgb, var(--c-surface) 66.96%, transparent) 16.67%,
-    color-mix(in srgb, var(--c-surface) 53.1%, transparent) 25%,
-    color-mix(in srgb, var(--c-surface) 40.98%, transparent) 33.33%,
-    color-mix(in srgb, var(--c-surface) 30.55%, transparent) 41.67%,
-    color-mix(in srgb, var(--c-surface) 21.76%, transparent) 50%,
-    color-mix(in srgb, var(--c-surface) 14.57%, transparent) 58.33%,
-    color-mix(in srgb, var(--c-surface) 8.92%, transparent) 66.67%,
-    color-mix(in srgb, var(--c-surface) 4.74%, transparent) 75%,
-    color-mix(in srgb, var(--c-surface) 1.94%, transparent) 83.33%,
-    color-mix(in srgb, var(--c-surface) 0.42%, transparent) 91.67%,
-    color-mix(in srgb, var(--c-surface) 0%, transparent) 100%
-  );
+#root.dock-auto #dock-hover-strip {
+  display: block;
 }
 
-.new-tab-template-rail-fade-end {
-  background-image: linear-gradient(
-    to left,
-    color-mix(in srgb, var(--c-surface) 100%, transparent) 0%,
-    color-mix(in srgb, var(--c-surface) 82.58%, transparent) 8.33%,
-    color-mix(in srgb, var(--c-surface) 66.96%, transparent) 16.67%,
-    color-mix(in srgb, var(--c-surface) 53.1%, transparent) 25%,
-    color-mix(in srgb, var(--c-surface) 40.98%, transparent) 33.33%,
-    color-mix(in srgb, var(--c-surface) 30.55%, transparent) 41.67%,
-    color-mix(in srgb, var(--c-surface) 21.76%, transparent) 50%,
-    color-mix(in srgb, var(--c-surface) 14.57%, transparent) 58.33%,
-    color-mix(in srgb, var(--c-surface) 8.92%, transparent) 66.67%,
-    color-mix(in srgb, var(--c-surface) 4.74%, transparent) 75%,
-    color-mix(in srgb, var(--c-surface) 1.94%, transparent) 83.33%,
-    color-mix(in srgb, var(--c-surface) 0.42%, transparent) 91.67%,
-    color-mix(in srgb, var(--c-surface) 0%, transparent) 100%
-  );
+/* The ``+``, which anchors the dock's left edge: a white outlined circle that, opened, widens
+   into the field -- the same box, animated wider, with the ``+`` staying as its glyph and the
+   field appearing in the room made. One control for both ways in: start something, or find
+   something. */
+.dock-launch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  height: var(--dock-launch-size);
+  width: var(--dock-launch-size);
+  flex: 0 0 auto;
+  border: 1px solid #c8c8d0;
+  border-radius: calc(var(--dock-launch-size) / 2);
+  background: #fff;
+  color: var(--ink);
+  overflow: hidden;
+  transition:
+    width 220ms cubic-bezier(0.2, 0.8, 0.3, 1),
+    border-color 130ms ease,
+    box-shadow 130ms ease;
+}
+
+.dock-launch:hover {
+  border-color: #a1a1aa;
+}
+
+.dock-launch.is-open {
+  width: var(--dock-launch-open-w);
+  border-color: #a1a1aa;
+  box-shadow: 0 0 0 3px rgba(24, 24, 27, 0.06);
+}
+
+.dock-new {
+  width: calc(var(--dock-launch-size) - 2px);
+  height: calc(var(--dock-launch-size) - 2px);
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+/* The glyph is a larger fraction of its button than the app icons are of their tiles: the ``+``
+   is a line drawing on white with no fill behind it, so it needs the extra weight to hold its
+   own next to a row of tinted squares. */
+.dock-new svg {
+  width: 18px;
+  height: 18px;
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+/* Open, the plus turns into a close: the same press puts the control away. */
+.dock-launch.is-open .dock-new svg {
+  transform: rotate(135deg);
+}
+
+.dock-search-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0 10px 0 2px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  outline: none;
+}
+
+.dock-search-field::placeholder {
+  color: var(--ink-faint);
+}
+
+.dock-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--line);
+}
+
+/* The row of what is running takes whatever width the fixed things around it leave, and a row
+   longer than that scrolls sideways under the pointer rather than shrinking its tiles: every
+   tile stays the size of the ``+``. The scrollbar is hidden -- a dock is not a document -- so
+   the row reads as a row and the wheel or a trackpad moves it. */
+.dock-items {
+  display: flex;
+  align-items: center;
+  gap: var(--dock-gap);
+  flex: 1 1 0;
+  min-width: 0;
+  /* Room for the tiles' own box, so the scroll box clips nothing of them. */
+  height: var(--dock-h);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.dock-items::-webkit-scrollbar {
+  display: none;
+}
+
+.dock-item {
+  position: relative;
+  width: var(--dock-tile);
+  height: var(--dock-tile);
+  flex: 0 0 var(--dock-tile);
+  border: 0;
+  border-radius: calc(var(--dock-tile) * 0.32);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  background: #f2f2f5;
+}
+
+/* No lift on hover: the user asked for tiles that stay put. The tooltip is the whole of the
+   feedback now, which is why it appears with no delay (see hoverTooltip.ts). */
+
+.dock-item svg {
+  width: calc(var(--dock-tile) * 0.52);
+  height: calc(var(--dock-tile) * 0.52);
+}
+
+/* Running, but not on screen. Minimizing a window and never having opened one are the same state,
+   so they read the same way: a smaller tile, at full strength (the fade this used to use was the
+   thing the user did not want). Redefining ``--dock-tile`` on the element rescales the whole tile
+   at once -- its box, its flex basis, its corner radius and its icon are all calcs over that one
+   number -- so there is a single size to change and nothing can fall out of step. ``.dock-items``
+   centres the row, so a shorter tile keeps the same centre line as a full-height one. */
+.dock-item.is-offscreen {
+  --dock-tile: var(--dock-tile-offscreen);
+}
+
+.dock-hint {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}
+
+.dock-toggle {
+  position: relative;
+  width: var(--dock-launch-size);
+  height: var(--dock-launch-size);
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-faint);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 110ms ease;
+}
+
+.dock-toggle:hover {
+  background: #ececf0;
+}
+
+.dock-toggle svg {
+  width: 17px;
+  height: 17px;
+}
+
+/* ---------- the + menu ---------- */
+
+/* Invisible, but it swallows the click that dismisses the menu so the same click cannot also
+   press whatever sits underneath. Under the dock rather than over it: the press that puts the
+   menu away must not be the press that takes the keyboard out of the field. */
+#launcher-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 4990; /* design-system-exception: over the windows, under the dock the field is in */
+  display: none;
+}
+
+#launcher-scrim.is-open {
+  display: block;
+}
+
+#launcher {
+  position: absolute;
+  /* Flush with the + below it (the dock's own left padding), and as wide as it opens. */
+  left: 14px;
+  bottom: calc(var(--dock-h) + 6px);
+  width: var(--dock-launch-open-w);
+  /* Tall enough for the whole menu on any desktop: it opens upward from the field, so a list
+     that had to scroll would hide its LAST rows -- the pair nearest the hand. */
+  max-height: calc(100vh - var(--dock-h) - 24px);
+  overflow-y: auto;
+  padding: 6px;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow:
+    0 0 0 1px rgba(16, 18, 27, 0.05),
+    0 18px 48px rgba(16, 18, 27, 0.16);
+  z-index: 5003; /* design-system-exception: the topmost surface on the desktop, above its own scrim */
+  display: none;
+}
+
+#launcher.is-open {
+  display: block;
+}
+
+/* The menu and, under it, the search's results: two runs of the same rows, one list. */
+.launcher-items,
+.launcher-results {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.launcher-results--after-items {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.launcher-empty {
+  padding: 14px 8px;
+  font-size: 12.5px;
+  color: var(--ink-faint);
+  text-align: center;
+}
+
+/* The part of a row the query matched: bold, and in the row's own ink rather than the faint
+   subtitle grey, so the eye lands on why the row is there. */
+.result-match {
+  background: transparent;
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.result-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+  border: 0;
+  background: transparent;
+  border-radius: 9px;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: var(--ink);
+}
+
+.result-row:hover {
+  background: #f4f4f6;
+}
+
+.result-tile {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+}
+
+.result-tile svg {
+  width: 14px;
+  height: 14px;
+}
+
+.result-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.result-title {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-sub {
+  font-size: 11.5px;
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.result-state {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* ---------- the chat list (a listing app's rail) ---------- */
+
+/* The chat list's shredder, shown while a chat is being deleted: the sheet feeds down into the slot
+ * (clipped there, so it vanishes into the machine) and the strips below draw on one after another,
+ * on a loop for as long as the delete takes. */
+@keyframes chat-sidebar-shred-feed {
+  from {
+    transform: translateY(-3px);
+  }
+  to {
+    transform: translateY(11px);
+  }
+}
+@keyframes chat-sidebar-shred-strip {
+  0% {
+    stroke-dashoffset: 1;
+  }
+  60%,
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+.chat-sidebar-shredder-sheet {
+  animation: chat-sidebar-shred-feed 1.4s ease-in infinite;
+}
+.chat-sidebar-shredder-strip {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: chat-sidebar-shred-strip 1.4s linear infinite;
+}
+.chat-sidebar-shredder-strip:nth-of-type(2) {
+  animation-delay: 0.15s;
+}
+.chat-sidebar-shredder-strip:nth-of-type(3) {
+  animation-delay: 0.3s;
+}
+.chat-sidebar-shredder-strip:nth-of-type(4) {
+  animation-delay: 0.45s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-sidebar-shredder-sheet,
+  .chat-sidebar-shredder-strip {
+    animation: none;
+    stroke-dashoffset: 0;
+  }
+}
+
+/* The chat list's working chat: its dot breathes and its title carries the glint the progress
+ * view's live narration has, so a busy chat is spotted at a glance down the rail. */
+@keyframes chat-sidebar-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+.chat-sidebar-dot--pulse {
+  animation: chat-sidebar-pulse 1.6s ease-in-out infinite;
+}
+/* The working title's glint: one bright band that sweeps the text at a FIXED SPEED, then a fixed
+ * pause before the next pass -- so a long name takes longer to cross and a short one does not
+ * leave the rail waiting. The row measures its title and hands the width over as
+ * --chat-title-width (a number of px); the distance and the duration are worked out from it,
+ * with the band parked past the text's end for the pause. Two layers under the text clip: the
+ * moving band on top, the text's own colour underneath so the letters never go blank. */
+/* Reckoned from the band's bright centre, which is what the eye sees come and go: the pass starts
+ * with the centre at the text's left edge and the pause runs from the centre leaving its right
+ * edge to the next pass, so the pause the user times is the one set here. */
+@keyframes chat-sidebar-title-shimmer {
+  from {
+    background-position:
+      calc(-0.5px * var(--chat-shimmer-band)) 0,
+      0 0;
+  }
+  to {
+    background-position:
+      calc(
+          1px *
+            (
+              var(--chat-title-width, 120) - 0.5 * var(--chat-shimmer-band) + var(--chat-shimmer-speed) *
+                var(--chat-shimmer-pause)
+            )
+        )
+        0,
+      0 0;
+  }
+}
+.chat-sidebar-title--working {
+  --chat-shimmer-band: 72; /* px wide */
+  --chat-shimmer-speed: 90; /* px per second */
+  --chat-shimmer-pause: 1.5; /* seconds parked past the end of the text */
+  background:
+    linear-gradient(90deg, currentColor 0%, var(--c-surface) 50%, currentColor 100%),
+    linear-gradient(currentColor, currentColor);
+  background-size:
+    calc(1px * var(--chat-shimmer-band)) 100%,
+    100% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: chat-sidebar-title-shimmer
+    calc(
+      1s * (var(--chat-title-width, 120) + var(--chat-shimmer-speed) * var(--chat-shimmer-pause)) /
+        var(--chat-shimmer-speed)
+    )
+    linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-sidebar-dot--pulse,
+  .chat-sidebar-title--working {
+    animation: none;
+  }
+  .chat-sidebar-title--working {
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
 }
