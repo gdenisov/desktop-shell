@@ -10,7 +10,7 @@ slug = "desktop-shell"
 title = "Desktop Shell"
 description = "A desktop workspace UI: a rearrangeable icon grid, a dock that opens into search, windows with put-away tiles, and chats as pages with an instance rail."
 thumbnail = "template.svg"
-version = "v2"
+version = "v3"
 
 # How this template is DERIVED from the workspace it came from. An
 # update re-runs this recipe rather than diffing two repos, which is what
@@ -24,6 +24,7 @@ exclude = [
     "uv.lock (left at the clean base: the only change to it since the base was the excluded zen garden package, so shipping the source mind's copy would name a workspace member that is not in this tree)",
     "data/ (all workspace data: chats, notes, memories, saved desktop layouts and icon arrangements, projects, uploads)",
     "docs/VERSION_HISTORY.md",
+    "system/apps/system_interface/frontend/src/views/{AllAppsPicker,DockviewWorkspace,NewTabLauncher,ProjectMembershipDialog,ProjectSettingsModal,Sidebar,TemplateDetailModal,TemplateShelves,hoverLift,squiggles,tab-rename,tabMenu}{,.test}.ts and imbue/system_interface/shell/dockview_document{,_test}.py (the interface this desktop replaced: the source workspace deleted all 26, and an overlay onto the clean base does not mirror a deletion, so they must be removed explicitly on every re-cut -- DockviewWorkspace.ts imports dockview-core, which the desktop's package.json no longer declares, and its presence fails the frontend build)",
 ]
 modification_rules = []
 

@@ -2,7 +2,7 @@
 title: "Desktop Shell"
 description: "A desktop workspace UI: a rearrangeable icon grid, a dock that opens into search, windows with put-away tiles, and chats as pages with an instance rail."
 thumbnail: "template.svg"
-version: v2
+version: v3
 format: v2
 ---
 
@@ -281,6 +281,8 @@ This is distinct from "Adaptation history" below, which is the ADOPTERS' log.
 ### v1 (2026-09-18) -- the workspace UI rebuilt as a desktop: a rearrangeable icon grid, floating windows with a put-away dock, a `+` that opens into an apps-and-search field, and an instance rail that moves the chat list out of the chat app and onto the desktop.
 
 ### v2 (2026-09-18) -- closing the window of an app that runs as a single program now stops that program, so the memory it holds goes away with the window rather than outliving it.
+
+### v3 (2026-09-18) -- drops 26 files of the interface this desktop replaced, which the first assembly carried in from the clean base because an overlay adds the source's files but does not mirror its deletions. One of them imported a package the desktop's `package.json` no longer declares, so `npm run build` failed and an adopter got the recovery page instead of the desktop.
 
 ## Adaptation history
 
